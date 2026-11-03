@@ -203,7 +203,15 @@ export function qwenworkMessages(
     if (m.role === 'system' || m.role === 'developer') continue
 
     if (m.role === 'user') {
-      open = []
+      // 注意：这里**不清空 open**。
+      //
+      // DSH 会把工具结果塞在 user 消息的 content 里当 tool-result 块，
+      // 如果一见到 user 就把待认领的 call 清掉，那些结果就永远配不上 id，
+      // 只能被并回用户轮当纯文本。真正的 user 轮在下面会自己写出去，
+      // 而 flushLoose 只在有 loose 内容时才会动 out。
+      if (!rawBlocksOf(m.content).some(b => b?.type === 'tool-result')) {
+        open = []
+      }
       flushLoose()
     } else if (m.role !== 'tool') {
       flushLoose()
@@ -284,8 +292,31 @@ export function qwenworkMessages(
     }
 
     // user
+    //
+    // DSH 有时候不把工具结果单独发成 role:'tool' 消息，而是塞在 user
+    // 消息的 content 里当 `{ type:'tool-result', toolCallId, content }` 块
+    // （见 dsh-magpie-connect/messages.ts:371-386）。那些块不能当普通
+    // 内容丢掉，要拆成独立的 tool 轮，否则模型看不到工具返回值。
+    const results = rawBlocksOf(m.content).filter(
+      (b): b is Extract<HarnessBlock, { type: 'tool-result' }> => b?.type === 'tool-result',
+    )
     const blocks = blocksOf(m.content, resolved)
     if (blocks.length) out.push({ role: 'user', content: blocks })
+
+    for (const r of results) {
+      const text = textOf(r.content)
+      const named = String(r.toolCallId ?? '').trim()
+      let at = named ? open.indexOf(named) : -1
+      if (at < 0) at = 0
+      if (open.length === 0) {
+        // 没有可认领的 call：把内容并回用户轮，别丢字
+        const said = text.trim()
+        if (said) out.push({ role: 'user', content: [{ type: 'text', text: said }] })
+        continue
+      }
+      const answered = open.splice(at, 1)[0]!
+      out.push({ role: 'tool', tool_call_id: answered, content: text })
+    }
   }
 
   flushLoose()

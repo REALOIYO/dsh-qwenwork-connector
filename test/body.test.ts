@@ -463,3 +463,50 @@ test('DSH 与 OpenAI 两种工具形状混用也能处理', () => {
   const tools = turns.filter(t => t.role === 'tool')
   assert.equal(tools.length, 2, '两种 id 写法都要能配对')
 })
+
+test('回归：user 消息里内嵌的 tool-result 块要拆成独立 tool 轮', () => {
+  // DSH 有时不把工具结果发成 role:'tool' 消息，而是塞在 user content 里
+  // 当 { type:'tool-result', toolCallId, content } 块。曾经把这些块当普通
+  // 内容丢掉，模型看不到工具返回值。
+  const turns = qwenworkMessages([
+    { role: 'user', content: [{ type: 'text', text: '读文件' }] },
+    {
+      role: 'assistant',
+      content: [{ type: 'tool-call', id: 'tc-1', name: 'read_file', arguments: { path: 'a' } }],
+    },
+    {
+      role: 'user',
+      content: [
+        { type: 'tool-result', toolCallId: 'tc-1', content: [{ type: 'text', text: 'AAAA' }] },
+      ],
+    },
+  ])
+
+  const tool = turns.find(t => t.role === 'tool')
+  assert.ok(tool, '内嵌的 tool-result 要被拆出来')
+  assert.equal(tool.tool_call_id, 'tc-1', 'id 要能从驼峰 toolCallId 对上')
+  assert.equal(tool.content, 'AAAA', '内容不能丢')
+})
+
+test('内嵌 tool-result 与正文同时存在时都要保留', () => {
+  const turns = qwenworkMessages([
+    { role: 'user', content: [{ type: 'text', text: 'x' }] },
+    {
+      role: 'assistant',
+      content: [{ type: 'tool-call', id: 'tc-1', name: 'f', arguments: {} }],
+    },
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: '顺便说一句' },
+        { type: 'tool-result', toolCallId: 'tc-1', content: [{ type: 'text', text: 'R' }] },
+      ],
+    },
+  ])
+  const texts = turns.filter(t => t.role === 'user').flatMap(t =>
+    Array.isArray(t.content) ? t.content.filter((b: { type?: string }) => b.type === 'text').map((b: { text: string }) => b.text) : [],
+  )
+  assert.ok(texts.includes('顺便说一句'), '正文要留')
+  const tool = turns.find(t => t.role === 'tool')
+  assert.equal(tool?.content, 'R', '工具结果也要留')
+})
