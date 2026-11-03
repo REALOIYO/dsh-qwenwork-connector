@@ -1,0 +1,44 @@
+{
+  "name": "dsh-qwenwork-connect",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "QwenWork (千问办公) models for DeepSeek Harness: a native dsh-llm adapter that signs in with QwenWork's own device flow and speaks its agent_chat_generation protocol directly — no separate gateway application.",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "qwenwork",
+    "qwen",
+    "llm-adapter",
+    "llm-provider"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": "^0.1.2-rc.1 || ^0.1.7-rc.2 || ^0.2.0-rc.1",
+    "@deepseek-ai/cordis": "^4.0.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-llm": { "optional": true },
+    "@deepseek-ai/cordis": { "optional": true }
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test test/",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "files": [
+    "lib",
+    "dsh.plugin.json",
+    "cordis.patch.yml",
+    "README.md"
+  ]
+}

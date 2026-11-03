@@ -1,0 +1,14 @@
+# dsh-qwenwork-connect — bundle patch: insert the plugin row.
+#
+# The plugin registers itself as a dsh-llm adapter. Sign-in happens on the
+# plugin's own settings page (device flow), so the config below only carries
+# the endpoint and the state directory.
+#
+# - providerId:   route id registered into DSH (renaming orphans sessions).
+# - displayName:  grouping label in the model picker.
+# - dataDir:      where the signed-in accounts are kept.
+# - gateway:      QwenWork's own API host.
+- insert:
+    - id: dsh-qwenwork-connect
+      name: 'dsh-qwenwork-connect'
+      config: {}
