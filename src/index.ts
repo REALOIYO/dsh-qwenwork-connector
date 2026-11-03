@@ -15,6 +15,8 @@ import { homedir } from 'node:os'
 
 import { AccountStore, startDeviceSignIn, GATEWAY, type StoredAccount } from './adapter/auth.ts'
 import { QwenWorkAdapter, MODELS } from './adapter/qwenwork.ts'
+import { PrefsStore, AUTO_WINDOW } from './adapter/prefs.ts'
+import type { AttachmentStore } from './adapter/images.ts'
 
 /** 插件名，同时是 cordis 里的 id。 */
 export const name = 'dsh-qwenwork-connect'
@@ -120,11 +122,21 @@ function start(
   }
 
   const store = new AccountStore(cfg.dataDir)
+  const prefs = new PrefsStore(cfg.dataDir)
+
+  // 附件服务是可选依赖：没有它时图片无法上行（会明确告知，而不是静默丢）
+  const attachments = readAttachments(ctx)
+  if (attachments === undefined) {
+    logger.warn('dsh-qwenwork-connect: 附件服务不可用，图片消息将无法发送')
+  }
+
   const adapter = new QwenWorkAdapter({
     providerId: cfg.providerId,
     displayName: cfg.displayName,
     gateway: cfg.gateway,
     store,
+    prefs,
+    ...(attachments !== undefined ? { attachments } : {}),
   })
 
   // 1. 先注册，选择器立刻可用。
@@ -142,21 +154,41 @@ function start(
     return { ready }
   }
 
-  // 2. 后台加载账号
-  void store.load().then((accounts: StoredAccount[]) => {
+  // 2. 后台加载账号，同时拉一次真实模型目录
+  void store.load().then(async (accounts: StoredAccount[]) => {
     if (accounts.length === 0) {
       logger.info('dsh-qwenwork-connect: 还没有登录账号，请在「设置 → 千问办公」完成设备码登录')
     } else {
       logger.info(`dsh-qwenwork-connect: 已加载 ${accounts.length} 个账号`)
+      // 有账号才拉得动目录（接口要签名）
+      await adapter.refreshModels(true).catch(() => {})
+      logger.info(`dsh-qwenwork-connect: 模型目录 ${adapter.models.length} 项（来自上游实测）`)
     }
   }).catch((error: unknown) => {
     logger.error(`dsh-qwenwork-connect: 账号加载失败：${error instanceof Error ? error.message : String(error)}`)
   })
 
   // 3. 设置页路由（可选：没有 connection 服务就跳过，不影响聊天）
-  installRoutes(ctx, cfg, store, logger)
+  installRoutes(ctx, cfg, store, prefs, adapter, logger)
 
   return { ready }
+}
+
+/**
+ * 取宿主的附件服务。
+ *
+ * 拿不到不是错误——插件照样能跑文本。只是图片消息会明确失败，
+ * 而不是静默丢成一句「[图片]」。
+ */
+function readAttachments(ctx: PluginContext): AttachmentStore | undefined {
+  try {
+    const service = typeof ctx.get === 'function' ? ctx.get('attachments') : undefined
+    const store = service as AttachmentStore | undefined
+    if (store !== undefined && typeof store.readImageRequest === 'function') return store
+    return undefined
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -169,6 +201,8 @@ function installRoutes(
   ctx: PluginContext,
   cfg: Resolved,
   store: AccountStore,
+  prefs: PrefsStore,
+  adapter: QwenWorkAdapter,
   logger: PluginContext['logger'],
 ): void {
   if (typeof ctx.inject !== 'function') return
@@ -214,11 +248,29 @@ function installRoutes(
       // GET /api/qwenwork/status — 已登录账号与模型清单
       registerRoute(`${API_PREFIX}/status`, ['GET'], async () => {
         await store.load()
+        await prefs.load()
+        // 真实能力来自适配器当前的模型目录（登录后会拉到上游真值）
+        const models = adapter.models.map(m => ({
+          id: m.key,
+          name: m.displayName,
+          description: m.description,
+          rate: m.rate,
+          rateWas: m.rateWas,
+          free: m.free,
+          vision: m.isVision === true,
+          reasoning: m.isReasoning === true,
+          efforts: m.efforts ?? [],
+          maxInputTokens: m.maxInputTokens,
+          windows: m.windows ?? [],
+          defaultWindow: m.defaultWindow,
+          // 用户当前选定的档位；0 = 自动
+          window: prefs.windowFor(m.key),
+        }))
         return json(200, {
           ok: true,
           providerId: cfg.providerId,
           displayName: cfg.displayName,
-          models: MODELS.map(m => ({ id: m.key, name: m.displayName })),
+          models,
           accounts: store.list().map(a => ({
             uid: a.uid,
             label: a.label ?? a.uid,
@@ -227,6 +279,35 @@ function installRoutes(
             expires: a.expires,
           })),
         })
+      })
+
+      // POST /api/qwenwork/window — 设某个模型的上下文档位（0 = 自动）
+      registerRoute(`${API_PREFIX}/window`, ['POST'], async (request: Request) => {
+        try {
+          const body = (await request.json().catch(() => ({}))) as { model?: unknown; window?: unknown }
+          const model = String(body.model ?? '').trim()
+          if (model === '') return json(400, { ok: false, error: 'model 必填' })
+          const raw = Number(body.window)
+          const window = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : AUTO_WINDOW
+          await adapter.setWindowPreference(model, window)
+          logger.info(`dsh-qwenwork-connect: ${model} 上下文档位设为 ${window === 0 ? '自动' : window}`)
+          return json(200, { ok: true, model, window })
+        } catch (error) {
+          return json(500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+        }
+      })
+
+      // POST /api/qwenwork/models/refresh — 强制重拉上游模型目录
+      registerRoute(`${API_PREFIX}/models/refresh`, ['POST'], async () => {
+        try {
+          await adapter.refreshModels(true)
+          return json(200, {
+            ok: true,
+            models: adapter.models.map(m => ({ id: m.key, name: m.displayName, rate: m.rate, vision: m.isVision === true, reasoning: m.isReasoning === true })),
+          })
+        } catch (error) {
+          return json(500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+        }
       })
 
       // POST /api/qwenwork/login — 发起设备码登录，返回待授权地址

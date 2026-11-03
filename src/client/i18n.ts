@@ -39,7 +39,13 @@ export const ZH: Dict = {
   balance: '余额',
 
   modelSection: '可用模型',
-  modelHint: '这些是千问办公当前提供的模型，登录后即可在模型选择器里选到。',
+  modelHint: '这些是千问办公当前提供的模型，登录后即可在模型选择器里选到。倍率是相对标准价的倍数，越低越便宜。',
+  free: '免费',
+  vision: '可看图',
+  thinking: '会思考',
+  maxInput: '最大输入',
+  contextWindow: '上下文',
+  contextAuto: '自动',
 
   cancel: '取消',
   error: '出错了',
@@ -72,7 +78,13 @@ export const EN: Dict = {
   balance: 'Balance',
 
   modelSection: 'Available models',
-  modelHint: 'Models QwenWork offers right now. They appear in the model picker once signed in.',
+  modelHint: 'Models QwenWork offers right now. The multiplier is relative to standard pricing — lower is cheaper.',
+  free: 'free',
+  vision: 'vision',
+  thinking: 'thinking',
+  maxInput: 'max input',
+  contextWindow: 'Context',
+  contextAuto: 'Auto',
 
   cancel: 'Cancel',
   error: 'Error',

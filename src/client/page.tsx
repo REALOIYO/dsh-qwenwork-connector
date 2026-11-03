@@ -19,7 +19,21 @@ interface StatusPayload {
   ok: boolean
   providerId: string
   displayName: string
-  models: Array<{ id: string; name: string }>
+  models: Array<{
+    id: string
+    name: string
+    description?: string
+    rate?: number
+    rateWas?: number
+    free?: boolean
+    vision?: boolean
+    reasoning?: boolean
+    efforts?: string[]
+    maxInputTokens?: number
+    windows?: number[]
+    defaultWindow?: number
+    window?: number
+  }>
   accounts: Array<{
     uid: string
     label: string
@@ -43,6 +57,26 @@ const REQUEST_TIMEOUT_MS = 30_000
 const POLL_INTERVAL_MS = 2000
 /** 登录等待上限（与后端一致）。 */
 const LOGIN_WAIT_MS = 15 * 60 * 1000
+
+/** 倍率显示成 `0.1×` / `1.8×`。 */
+function formatRate(rate: number | undefined): string {
+  if (rate === undefined || !Number.isFinite(rate) || rate <= 0) return ''
+  return `${Number(rate.toFixed(2))}×`
+}
+
+/** token 数显示成 `1M` / `400K` / `200K`。 */
+function formatTokens(tokens: number): string {
+  if (!Number.isFinite(tokens) || tokens <= 0) return ''
+  if (tokens >= 1_000_000) {
+    const m = tokens / 1_000_000
+    return `${Number(m.toFixed(1))}M`
+  }
+  if (tokens >= 1000) {
+    const k = tokens / 1000
+    return `${Number(k.toFixed(0))}K`
+  }
+  return String(tokens)
+}
 
 const css = {
   section: { display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 780, paddingBottom: 32 } as const,
@@ -78,6 +112,22 @@ const css = {
     background: 'var(--dsw-alias-bg-layer-2, transparent)',
   },
   models: { display: 'flex', flexWrap: 'wrap' as const, gap: 8 },
+  modelRow: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: 12,
+    padding: '10px 12px',
+    border: '1px solid var(--dsw-alias-border-l2)',
+    borderRadius: 10,
+  } as const,
+  select: {
+    padding: '4px 8px',
+    borderRadius: 6,
+    fontSize: 12,
+    border: '1px solid var(--dsw-alias-border-l2)',
+    background: 'var(--dsw-alias-bg-layer-2, transparent)',
+    color: 'var(--dsw-alias-label-primary)',
+  } as const,
   chip: {
     padding: '4px 10px',
     borderRadius: 999,
@@ -241,6 +291,22 @@ export function QwenWorkSettings(): React.ReactElement {
     [load],
   )
 
+  /** 改某个模型的上下文档位；0 表示自动。 */
+  const setWindow = useCallback(
+    async (model: string, tokens: number) => {
+      setBusy(true)
+      try {
+        await request('/api/qwenwork/window', 'POST', { model, window: tokens })
+        await load()
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e))
+      } finally {
+        setBusy(false)
+      }
+    },
+    [load],
+  )
+
   const accounts = status?.accounts ?? []
   const models = status?.models ?? []
 
@@ -329,11 +395,53 @@ export function QwenWorkSettings(): React.ReactElement {
         {status === null ? (
           <p style={css.hint}>{text('loading')}</p>
         ) : (
-          <div style={css.models}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {models.map(m => (
-              <span key={m.id} style={css.chip}>
-                {m.name} · {m.id}
-              </span>
+              <div key={m.id} style={css.modelRow}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0, flex: 1 }}>
+                  <div style={css.row}>
+                    <strong style={{ fontSize: 13, color: 'var(--dsw-alias-label-primary)' }}>{m.name}</strong>
+                    {m.rate !== undefined && m.rate > 0 && (
+                      <span style={css.chip}>
+                        {m.rateWas !== undefined && m.rateWas > m.rate && (
+                          <s style={{ opacity: 0.6, marginRight: 4 }}>{formatRate(m.rateWas)}</s>
+                        )}
+                        {formatRate(m.rate)}
+                      </span>
+                    )}
+                    {m.free === true && <span style={css.chip}>{text('free')}</span>}
+                    {m.vision === true && <span style={css.chip}>{text('vision')}</span>}
+                    {m.reasoning === true && <span style={css.chip}>{text('thinking')}</span>}
+                  </div>
+                  {m.description !== undefined && m.description !== '' && (
+                    <span style={css.hint}>{m.description}</span>
+                  )}
+                  <span style={css.hint}>
+                    {m.id}
+                    {m.maxInputTokens !== undefined && m.maxInputTokens > 0
+                      ? ` · ${text('maxInput')} ${formatTokens(m.maxInputTokens)}`
+                      : ''}
+                  </span>
+                </div>
+                {(m.windows ?? []).length > 1 && (
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-end' }}>
+                    <span style={css.hint}>{text('contextWindow')}</span>
+                    <select
+                      value={String(m.window ?? 0)}
+                      disabled={busy}
+                      onChange={e => void setWindow(m.id, Number(e.target.value))}
+                      style={css.select}
+                    >
+                      <option value="0">{text('contextAuto')}</option>
+                      {(m.windows ?? []).map(w => (
+                        <option key={w} value={String(w)}>
+                          {formatTokens(w)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+              </div>
             ))}
           </div>
         )}

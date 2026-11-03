@@ -158,15 +158,35 @@ export function failure(status: number, text: string): Failure {
     return { status: 502, message: msg, code: 'SERVER' }
   }
 
+  /**
+   * 上游 429「All models failed」是**模型池暂时没有可用实例**，不是额度耗尽。
+   *
+   * 这个必须放在额度判断之前：实测多轮循环第 4 轮就会撞上，账号明明还有
+   * 899 credits。误判成额度会导致插件直接放弃，表现就是「跑一会儿就停」。
+   * 归为可重试的服务端错误，让调用方等一会儿再来。
+   */
+  if (/all models failed/i.test(msg)) {
+    return {
+      status: 503,
+      message: `千问办公模型池暂时不可用（${msg}），稍后重试`,
+      code: 'MODEL_POOL_BUSY',
+      retryAfter: BUSY_WAIT,
+    }
+  }
+
   // 5. 登录失效
   if (status === 401 || status === 403) {
     const said = msg && msg !== `HTTP ${status}` ? `（上游说 ${status}：${msg.slice(0, 300)}）` : ''
     return { status: 401, message: `登录已失效，请重新登录${said}`, code: 'AUTH', lapsed: true }
   }
 
-  // 6. 明确说额度
-  if (status === 429 || /quota|credits?|usage limit|insufficient/i.test(msg)) {
+  // 6. 明确说额度（必须是额度字眼，不能只看 429）
+  if (/quota|credits?|usage limit|insufficient|balance/i.test(msg)) {
     return { status: 429, message: `用量已用完：${msg}`, code: 'QUOTA_EXCEEDED' }
+  }
+  // 429 但没有额度字眼：按限流处理，等一会儿再来
+  if (status === 429) {
+    return { status: 429, message: `上游限流：${msg}`, code: 'MODEL_POOL_BUSY', retryAfter: BUSY_WAIT }
   }
 
   // 7. 兜底

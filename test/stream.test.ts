@@ -204,3 +204,25 @@ test('空回答报 EMPTY_RESPONSE 而非静默 stop', async () => {
   assert.equal(fin.reason.kind, 'error')
   assert.equal(fin.reason.failure?.code, 'EMPTY_RESPONSE')
 })
+
+test('"All models failed" 是模型池忙，不是额度耗尽（这是「跑一会儿就停」的根因）', async () => {
+  const frame = `data: ${JSON.stringify({ body: JSON.stringify({ code: '429', message: 'All models failed' }), statusCodeValue: 429 })}`
+  await assert.rejects(async () => {
+    for await (const _ of toStreamChunks(streamOf(frame), 'm')) void _
+  }, (e: unknown) => {
+    const err = e as { code?: string; message: string; retryAfter?: number }
+    assert.equal(err.code, 'MODEL_POOL_BUSY', `不该判成额度，得到 ${err.code}: ${err.message}`)
+    assert.ok((err.retryAfter ?? 0) > 0, '应带 Retry-After 让调用方退避')
+    return true
+  })
+})
+
+test('真额度耗尽仍然判 QUOTA_EXCEEDED', async () => {
+  const frame = `data: ${JSON.stringify({ body: JSON.stringify({ code: '429', message: 'usage limit reached: no credits' }), statusCodeValue: 429 })}`
+  await assert.rejects(async () => {
+    for await (const _ of toStreamChunks(streamOf(frame), 'm')) void _
+  }, (e: unknown) => {
+    assert.equal((e as { code?: string }).code, 'QUOTA_EXCEEDED')
+    return true
+  })
+})

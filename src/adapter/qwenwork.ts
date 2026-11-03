@@ -19,26 +19,46 @@
 import { randomUUID } from 'node:crypto'
 
 import { AccountStore, GATEWAY, type StoredAccount } from './auth.ts'
-import { buildBody, type ChatRequest, type ModelEntry } from './body.ts'
-import { chatHeaders } from './cosy.ts'
+import { buildBody, type ChatRequest } from './body.ts'
+import { FALLBACK_MODELS, parseModelListing, type ModelEntry } from './catalog.ts'
+import { chatHeaders, clientHeaders, cosyHeaders } from './cosy.ts'
+import { collectImageRefs, resolveImages, type AttachmentStore, type ImageAttachmentRef, type ResolvedImage } from './images.ts'
+import type { PrefsStore } from './prefs.ts'
 import { encodeBody } from './codec.ts'
 import { toStreamChunks, UpstreamError, type StreamChunk, type FinishReason } from './stream.ts'
 
-/** 千问办公的模型列表。公开云当前就这三个。 */
-export const MODELS: ModelEntry[] = [
-  { key: 'flash', displayName: '标准', isReasoning: false, isVision: false, maxInputTokens: 131_072 },
-  { key: 'pro', displayName: '高级', isReasoning: false, isVision: false, maxInputTokens: 131_072 },
-  { key: 'qwen3.8-max-preview', displayName: 'Qwen3.8-Max', isReasoning: false, isVision: false, maxInputTokens: 131_072 },
-]
+/**
+ * 登录前/拿不到列表时用的模型快照。
+ * 真实能力（倍率、视觉、思考、上下文）见 `catalog.ts` 的实测值。
+ */
+export const MODELS: ModelEntry[] = FALLBACK_MODELS
+
+/** 模型列表端点。 */
+const LIST_PATH = '/algo/api/v2/model/list?Encode=1'
 
 /** 聊天端点。`Encode=1` 表示请求体要编码。 */
 const CHAT_PATH =
   '/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1'
 
-/** 默认上下文窗口，与客户端报的一致。 */
+/** 拿不到模型信息时的兜底值。 */
 const DEFAULT_CONTEXT_WINDOW = 131_072
 /** 默认最大输出。 */
 const DEFAULT_MAX_TOKENS = 32_000
+/** 模型列表的缓存时长：上游加了模型、调了价，最多这么久能跟上。 */
+const LIST_TTL_MS = 5 * 60 * 1000
+
+/**
+ * 模型池忙时的重试次数与最大等待。
+ *
+ * 上游的 "All models failed" 是池子里暂时没有可用实例，不是额度耗尽。
+ * 实测多轮 agent 循环第 3~4 轮就会撞上，等几秒通常就好了。
+ * 直接把这种状态抛给用户，表现就是「跑一会儿突然停」。
+ */
+const POOL_RETRIES = 2
+/** 单次等待上限，避免卡太久。 */
+const POOL_MAX_WAIT_MS = 20_000
+
+const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms))
 
 /** DSH 传给 stream 的参数（只声明用到的）。 */
 export interface GenerateOptions extends ChatRequest {
@@ -72,6 +92,10 @@ export interface QwenWorkAdapterOptions {
   gateway?: string
   /** 账号存储。 */
   store: AccountStore
+  /** 用户偏好（每个模型固定哪个上下文档位）。 */
+  prefs?: PrefsStore
+  /** 宿主的附件服务，用来把图片附件读成字节。 */
+  attachments?: AttachmentStore
 }
 
 /**
@@ -84,14 +108,40 @@ export class QwenWorkAdapter {
   readonly #displayName: string
   readonly #gateway: string
   readonly #store: AccountStore
+  readonly #prefs: PrefsStore | undefined
+  readonly #attachments: AttachmentStore | undefined
   /** 轮转游标：上次成功的账号下标。 */
   #cursor = 0
+  /** 上游真实模型目录；拿不到时为兜底快照。 */
+  #models: ModelEntry[] = FALLBACK_MODELS
+  /** 上次拉目录的时间，用于 TTL。 */
+  #modelsAt = 0
+  /** 正在进行的目录刷新，避免并发重复请求。 */
+  #refreshing: Promise<void> | null = null
 
   constructor(opts: QwenWorkAdapterOptions) {
     this.#providerId = opts.providerId ?? 'qwenwork'
     this.#displayName = opts.displayName ?? '千问办公'
     this.#gateway = (opts.gateway ?? GATEWAY).replace(/\/+$/, '')
     this.#store = opts.store
+    this.#prefs = opts.prefs
+    this.#attachments = opts.attachments
+  }
+
+  /** 某个模型当前固定的上下文档位；0 表示自动。 */
+  windowPreference(model: string): number {
+    return this.#prefs?.windowFor(model) ?? 0
+  }
+
+  /** 改某个模型的上下文档位偏好；0 恢复自动。 */
+  async setWindowPreference(model: string, tokens: number): Promise<void> {
+    if (this.#prefs === undefined) throw new Error('qwenwork: 偏好存储未初始化')
+    await this.#prefs.setWindow(model, tokens)
+  }
+
+  /** 当前模型目录（可能还没拉到真实值）。 */
+  get models(): ModelEntry[] {
+    return this.#models
   }
 
   // ── 契约方法 ──────────────────────────────────────────────────────────
@@ -113,24 +163,44 @@ export class QwenWorkAdapter {
 
   /** 选择器里列出的模型。 */
   listModels(provider: string): Array<{ provider: string; id: string; name: string; inputModalities: string[] }> {
-    return MODELS.map(m => ({
+    return this.#models.map(m => ({
       provider,
       id: m.key,
       name: m.displayName,
-      inputModalities: m.isVision ? ['text', 'image'] : ['text'],
+      inputModalities: m.isVision === true ? ['text', 'image'] : ['text'],
     }))
   }
 
-  /** 单个模型的元信息。 */
+  /**
+   * 单个模型的元信息。
+   *
+   * 这里如实反映上游给的能力：视觉、思考档位、真实上下文窗口。
+   * 少报一样，用户在选择器里就少一个能用的开关。
+   */
   resolveModel(provider: string, model: string): ResolvedModel {
-    const entry = MODELS.find(m => m.key === model)
+    const entry = this.#models.find(m => m.key === model)
+
+    // 思考档位：上游没给阶梯时不给 reasoning 字段——
+    // 带了空数组反而会让选择器显示一个空菜单
+    const levels = entry?.efforts ?? []
+    const reasoning =
+      levels.length > 0
+        ? {
+            efforts: levels.map(id => ({ id, name: effortName(id) })),
+            ...(entry?.defaultEffort ? { defaultEffort: entry.defaultEffort } : {}),
+          }
+        : undefined
+
     return {
       provider,
       id: model,
       name: entry?.displayName ?? model,
-      inputModalities: entry?.isVision ? ['text', 'image'] : ['text'],
-      context: { contextWindow: entry?.maxInputTokens ?? DEFAULT_CONTEXT_WINDOW },
+      inputModalities: entry?.isVision === true ? ['text', 'image'] : ['text'],
+      context: {
+        contextWindow: entry?.maxInputTokens ?? entry?.defaultWindow ?? DEFAULT_CONTEXT_WINDOW,
+      },
       defaultMaxTokens: DEFAULT_MAX_TOKENS,
+      ...(reasoning !== undefined ? { reasoning } : {}),
     }
   }
 
@@ -159,9 +229,11 @@ export class QwenWorkAdapter {
       throw new Error('qwenwork: 还没有登录账号，请在设置页完成设备码登录')
     }
 
-    const entry = MODELS.find(m => m.key === options.model)
+    const entry = this.#models.find(m => m.key === options.model)
     if (!entry) {
-      throw new Error(`qwenwork: 未知模型 "${options.model}"（可用：${MODELS.map(m => m.key).join(', ')}）`)
+      throw new Error(
+        `qwenwork: 未知模型 "${options.model}"（可用：${this.#models.map(m => m.key).join(', ')}）`,
+      )
     }
 
     // 从上次成功的位置开始轮转，避免总撞同一个坏账号
@@ -173,25 +245,38 @@ export class QwenWorkAdapter {
       const account = accounts[index]!
       lastAccount = account
 
-      // 一旦这一轮吐过内容，就不能换账号重来——用户已经看到了
-      let touched = false
-      try {
-        for await (const chunk of this.#streamOnce(account, entry, options)) {
-          if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta' || chunk.type === 'tool-call-delta') {
-            touched = true
+      // 模型池忙（"All models failed"）时同一个账号退避重试：
+      // 换号没用（池子是共享的），但直接失败会表现为「跑一会儿就停」。
+      for (let attempt = 0; ; attempt++) {
+        // 一旦这一轮吐过内容，就不能重来——用户已经看到了
+        let touched = false
+        try {
+          for await (const chunk of this.#streamOnce(account, entry, options)) {
+            if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta' || chunk.type === 'tool-call-delta') {
+              touched = true
+            }
+            yield chunk
           }
-          yield chunk
+          this.#cursor = index
+          return
+        } catch (error) {
+          if (touched) throw this.#describe(error, account)
+
+          if (error instanceof UpstreamError) {
+            // 模型池忙：等一会儿重试同一个账号
+            if (error.code === 'MODEL_POOL_BUSY' && attempt < POOL_RETRIES) {
+              const wait = (error.retryAfter ?? 30) * 1000
+              await sleep(Math.min(wait, POOL_MAX_WAIT_MS))
+              continue
+            }
+            // 只有「换个号可能就好」的失败才换号
+            if (isWorthAnotherAccount(error)) {
+              lastError = error
+              break
+            }
+          }
+          throw this.#describe(error, account)
         }
-        this.#cursor = index
-        return
-      } catch (error) {
-        if (touched) throw this.#describe(error, account)
-        // 只有「换个号可能就好」的失败才换号；排队与请求本身的问题换号无用
-        if (error instanceof UpstreamError && isWorthAnotherAccount(error)) {
-          lastError = error
-          continue
-        }
-        throw this.#describe(error, account)
       }
     }
 
@@ -200,13 +285,83 @@ export class QwenWorkAdapter {
 
   // ── 内部 ──────────────────────────────────────────────────────────────
 
+  /**
+   * 拉一次上游真实模型目录。
+   *
+   * 失败不算致命：继续用当前目录（可能是兜底快照），下次再试。
+   * 并发调用共享同一次请求。
+   */
+  async refreshModels(force = false): Promise<void> {
+    if (!force && Date.now() - this.#modelsAt < LIST_TTL_MS) return
+    if (this.#refreshing !== null) return this.#refreshing
+
+    this.#refreshing = (async () => {
+      try {
+        const accounts = this.#store.list()
+        const account = accounts[0]
+        if (account === undefined) return
+
+        const url = this.#gateway + LIST_PATH
+        const headers = {
+          ...cosyHeadersForList(url, account),
+          Accept: 'application/json',
+        }
+        const res = await fetch(url, { headers })
+        if (!res.ok) return
+        const parsed: unknown = await res.json()
+        const models = parseModelListing(parsed)
+        if (models.length === 0) return
+        this.#models = models
+        this.#modelsAt = Date.now()
+      } catch {
+        // 拉不到就继续用旧的
+      } finally {
+        this.#refreshing = null
+      }
+    })()
+
+    return this.#refreshing
+  }
+
   /** 用指定账号跑一次。 */
   async *#streamOnce(account: StoredAccount, entry: ModelEntry, options: GenerateOptions): AsyncGenerator<StreamChunk> {
     const sessionId = options.sessionId ?? `qwenwork_${account.uid}`
     const requestId = randomUUID()
     const taskId = requestId
 
-    const body = buildBody(options, entry, sessionId, requestId, taskId)
+    // ── 图片：DSH 传的是附件引用，必须先读成 data URL，否则会被静默丢弃
+    const refs: ImageAttachmentRef[] = []
+    const inlineUrls: string[] = []
+    for (const message of options.messages) {
+      const found = collectImageRefs(message.content)
+      refs.push(...found.refs)
+      inlineUrls.push(...found.inlineUrls)
+    }
+    const totalImages = refs.length + inlineUrls.length
+
+    // 模型不支持视觉时明确失败，而不是悄悄把图丢掉
+    if (totalImages > 0 && entry.isVision !== true) {
+      throw new UpstreamError({
+        status: 400,
+        message: `模型 "${entry.displayName}" 不接受图片输入`,
+        code: 'INVALID_REQUEST',
+      })
+    }
+
+    const read = await resolveImages(refs, this.#attachments, options.signal)
+    /** attachmentId → 读好的图片，供 body 构造时查。 */
+    const resolved = read.images
+
+    const body = buildBody(
+      options,
+      entry,
+      sessionId,
+      requestId,
+      taskId,
+      this.#prefs?.windowFor(entry.key) ?? 0,
+      resolved,
+      read.failed > 0 ? { failed: read.failed, ...(read.reason !== undefined ? { reason: read.reason } : {}) } : undefined,
+    )
     const wire = encodeBody(JSON.stringify(body))
     const url = this.#gateway + CHAT_PATH
     const headers = chatHeaders(url, account, wire, entry.key, entry.source ?? 'system')
@@ -262,4 +417,33 @@ export class QwenWorkAdapter {
  */
 function isWorthAnotherAccount(e: UpstreamError): boolean {
   return e.code === 'AUTH' || e.code === 'QUOTA_EXCEEDED'
+}
+
+/** 思考档位的显示名。上游给的是 id，选择器里要人话。 */
+function effortName(id: string): string {
+  const names: Record<string, string> = {
+    none: '不思考',
+    minimal: '极简',
+    low: '低',
+    medium: '中',
+    high: '高',
+    xhigh: '极高',
+    max: '最大',
+    ultra: '极致',
+  }
+  return names[id] ?? id
+}
+
+/**
+ * 拉模型列表用的头。
+ *
+ * 列表不像聊天那样走 SSE，所以用普通 COSY 头 + 客户端身份头，
+ * 但场景要显式指定 qwork——不指定的话服务端按别的场景回，模型对不上。
+ */
+function cosyHeadersForList(url: string, account: StoredAccount): Record<string, string> {
+  return {
+    ...cosyHeaders(url, account, ''),
+    ...clientHeaders(),
+    'Cosy-Scene': 'qwork',
+  }
 }
