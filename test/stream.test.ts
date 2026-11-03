@@ -226,3 +226,29 @@ test('真额度耗尽仍然判 QUOTA_EXCEEDED', async () => {
     return true
   })
 })
+
+test('泛词 balance 不应误判为额度耗尽（429 但没额度语义 = 池子忙）', async () => {
+  const frame = `data: ${JSON.stringify({
+    body: JSON.stringify({ code: '429', message: 'load balance failed, please retry' }),
+    statusCodeValue: 429,
+  })}`
+  await assert.rejects(async () => {
+    for await (const _ of toStreamChunks(streamOf(frame), 'm')) void _
+  }, (e: unknown) => {
+    assert.equal((e as { code?: string }).code, 'MODEL_POOL_BUSY', '不该判成 QUOTA_EXCEEDED')
+    return true
+  })
+})
+
+test('「额度/余额」中文提示也要认成额度用完', async () => {
+  const frame = `data: ${JSON.stringify({
+    body: JSON.stringify({ code: '429', message: '当前套餐额度已用尽' }),
+    statusCodeValue: 429,
+  })}`
+  await assert.rejects(async () => {
+    for await (const _ of toStreamChunks(streamOf(frame), 'm')) void _
+  }, (e: unknown) => {
+    assert.equal((e as { code?: string }).code, 'QUOTA_EXCEEDED')
+    return true
+  })
+})

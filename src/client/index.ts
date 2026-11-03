@@ -70,7 +70,7 @@ export function apply(ctx: ClientContext): void {
             setLocaleRuntime(undefined)
           }
         },
-        'dsh-qwenwork-connect: locale dictionaries',
+        'dsh-qwenwork-connector: locale dictionaries',
       )
     } catch {
       registerDictionaries(ctx)
@@ -83,7 +83,7 @@ export function apply(ctx: ClientContext): void {
     ctx.slots.register(
       {
         name: 'settings.section',
-        id: 'dsh-qwenwork-connect',
+        id: 'dsh-qwenwork-connector',
         order: 13,
         locale: NS,
         label: () => text('nav'),

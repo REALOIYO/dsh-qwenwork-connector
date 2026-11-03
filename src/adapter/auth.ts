@@ -70,7 +70,7 @@ export interface AccountContext {
   quota?: AccountQuota
   renewsAt?: number
   period?: string
-  /** 展示用余额文案，如 `895.36 credits`。 */
+  /** 展示用余额文案，如 `1234.57 credits`。 */
   balance?: string
 }
 
@@ -272,7 +272,7 @@ export async function readAccountContext(gateway: string, token: string): Promis
 /**
  * 额度数字转文案：整数不带小数位，其余保留两位。
  *
- * 上游返回的是浮点（实际见过 895.3636），全按两位展示；但 900 这种整数
+ * 上游返回的是浮点（实际见过 1234.5678），全按两位展示；但 900 这种整数
  * 写成 `900.00` 只是噪音。
  */
 function round2(n: number): string {

@@ -1,4 +1,4 @@
-# dsh-qwenwork-connect — bundle patch: insert the plugin row.
+# dsh-qwenwork-connector — bundle patch: insert the plugin row.
 #
 # The plugin registers itself as a dsh-llm adapter. Sign-in happens on the
 # plugin's own settings page (device flow), so the config below only carries
@@ -9,6 +9,6 @@
 # - dataDir:      where the signed-in accounts are kept.
 # - gateway:      QwenWork's own API host.
 - insert:
-    - id: dsh-qwenwork-connect
-      name: 'dsh-qwenwork-connect'
+    - id: dsh-qwenwork-connector
+      name: 'dsh-qwenwork-connector'
       config: {}

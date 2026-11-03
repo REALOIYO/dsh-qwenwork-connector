@@ -56,7 +56,7 @@ await build({
   sourcemap: true,
   banner: {
     js: `window.__ModuleLoader__.load({
-  id: "dsh-qwenwork-connect",
+  id: "dsh-qwenwork-connector",
   factory: (require) => {
     var module = { exports: {} };
     var exports = module.exports;

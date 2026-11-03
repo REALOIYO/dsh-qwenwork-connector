@@ -1,9 +1,18 @@
 {
-  "name": "dsh-qwenwork-connect",
+  "name": "dsh-qwenwork-connector",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "type": "module",
-  "description": "QwenWork (千问办公) models for DeepSeek Harness: a native dsh-llm adapter that signs in with QwenWork's own device flow and speaks its agent_chat_generation protocol directly — no separate gateway application.",
+  "description": "千问办公（QwenWork）模型接入 DeepSeek Harness：自带设备码登录，直连官方接口，不需要安装桌面客户端，也不需要额外的网关程序。",
+  "author": "REALOIYO <115921813+REALOIYO@users.noreply.github.com> (https://github.com/REALOIYO)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/REALOIYO/dsh-qwenwork-connector.git"
+  },
+  "homepage": "https://github.com/REALOIYO/dsh-qwenwork-connector#readme",
+  "bugs": {
+    "url": "https://github.com/REALOIYO/dsh-qwenwork-connector/issues"
+  },
   "main": "./lib/index.js",
   "exports": {
     ".": {
@@ -20,6 +29,7 @@
     "deepseek-harness",
     "qwenwork",
     "qwen",
+    "千问办公",
     "llm-adapter",
     "llm-provider"
   ],

@@ -1,157 +1,150 @@
-# dsh-qwenwork-connect
+# dsh-qwenwork-connector
 
-把**千问办公（QwenWork）**的模型接进 DeepSeek Harness，做成原生 `LlmAdapter` 插件。
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
 
-**不需要安装千问办公客户端，也不需要 magpie 网关。** 签名、编码、登录全部在插件里实现。
+把**千问办公（QwenWork）**的模型接进 DeepSeek Harness。
 
-> ⚠️ **非官方**。千问办公没有公开 API，本项目按它的桌面客户端协议实现，
-> 属于对抗性反代。协议随时可能变，详见 [风险](#风险)。
+装一个插件就行，**不用装千问办公的桌面客户端，也不用另外跑一个转发程序**。
 
-## 为什么不是别的做法
+---
 
-| 方案 | 结论 |
-|---|---|
-| 加进 OFM 的 aggregate registry | ❌ 走不通。OFM 的 `resolveProvider` 见 oauth 直接抛错，wire 只认三种标准协议 |
-| 用 magpie 网关 + baseUrl | ✅ 可行但要多装一个软件 |
-| **本项目：原生 LlmAdapter** | ✅ 一个插件搞定，无额外进程 |
+## 这玩意儿是干嘛的
+
+你在千问办公买了套餐，想在自己的 DSH 里直接用它家的模型。
+
+官方没给这种用法，但有两条路能走通：
+
+一条是装千问办公的桌面版，再跑个叫 magpie 的转发工具，让它把请求转出去。
+这条路能用，缺点是电脑上多挂着两个软件，还得管着它们别死掉。
+
+这个插件走另一条路：**把客户端那套登录和请求直接写进插件里**。
+所以你的 DSH 里就是干干净净多了一个模型来源，没有多余的窗口和进程。
+
+一句话：**买了千问办公的套餐，就能在 DSH 里直接用**。
+
+---
 
 ## 装
 
 ```sh
-dsh plugin --profile desktop add "file:/path/to/dsh-qwenwork-connect"
+dsh plugin --profile desktop add dsh-qwenwork-connector
 ```
 
-或发布后：
+还没发布到 npm 的话，直接指到本地目录：
 
 ```sh
-dsh plugin --profile desktop add dsh-qwenwork-connect
+dsh plugin --profile desktop add "file:/path/to/dsh-qwenwork-connector"
 ```
 
-装完重启 DSH。模型选择器里会出现「千问办公」分组，含三个模型。
+装完重启 DSH。模型选择器里会多出一个「千问办公」分组。
+
+---
 
 ## 登录
 
-在设置页发起设备码登录（`POST /api/qwenwork/login`），拿到的 URL 形如：
+打开 **设置 → 千问办公**，点「登录」。
 
-```
-https://gateway.qwenwork.cn/device/selectAccounts?challenge=...&client_id=...&redirect_uri=qwenwork-cn://
-```
+会给你一个链接，用浏览器打开它，登录你的千问办公账号，点授权。
+然后就不用管了，插件自己在后台等着，一般几秒钟就登进去了。
 
-浏览器打开、登录并授权，插件每 2 秒轮询一次，成功后账号落到
-`~/.dsh-qwenwork-connect/accounts.json`。
+登录状态存在 `~/.dsh-qwenwork-connect/accounts.json`，
+不塞进 DSH 的配置目录里，这样你换 profile 或者重装插件都不影响。
 
-`redirect_uri=qwenwork-cn://` 是客户端注册的私有协议，只是照抄参数字符串，
-**不需要**它真能唤起任何程序。
+想退出就在设置页点「移除」。
 
-## 模型
+---
 
-| key | 名称 |
-|---|---|
-| `flash` | 标准 |
-| `pro` | 高级 |
-| `qwen3.8-max-preview` | Qwen3.8-Max |
+## 有哪些模型
 
-三个都是纯文本、不思考。个人账号的额度只报「剩余」，报不出已用比例——
-服务端的 quota 里 `total`/`used` 是 `null`，这不是插件的缺陷。
+| 模型 | 倍率 | 上下文 | 能看图 | 会思考 |
+|---|---|---|---|---|
+| 标准（flash） | 0.1× | 200K | ✅ | ✅ |
+| 高级（pro） | 1× | 400K | ✅ | ✅ |
+| Qwen3.8-Max | 1.8× | 1M | ✅ | ✅ |
 
-## 结构
+倍率是相对标准价的倍数，0.1× 就是打一折，1.8× 就是贵 1.8 倍。
+日常聊天用「标准」最划算，处理长文档或者要它认真推理就用另外两个。
 
-```
-src/
-├── index.ts              宿主半边：注册 provider、挂 REST API
-├── client/               前端半边：设置侧边栏入口
-│   ├── index.ts          注册 settings.section
-│   ├── page.tsx          登录 / 账号 / 模型 三块
-│   └── i18n.ts           中英文案
-└── adapter/
-    ├── codec.ts          Encode=1 的 body 编解码（纯函数）
-    ├── cosy.ts           COSY 信封签名（AES + RSA + md5）
-    ├── auth.ts           设备码登录、账号存储
-    ├── body.ts           DSH 请求 → agent_chat_generation
-    ├── stream.ts         SSE → DSH StreamChunk，失败分类
-    └── qwenwork.ts       7 个适配器契约方法
-```
+这三个都有**图片识别**能力，可以直接把图丢给它看。
+上下文长度可以在设置页里自己调，也可以留「自动」。
 
-分层是为了能独立测：`codec` 是纯函数，`cosy` 只依赖 crypto，`stream` 和
-`body` 能吃构造的字节流，只有 `qwenwork` 需要假服务器。
+> 注意：这几个模型只能**看图**，不能**画图**。千问办公目前没有对外开放生图模型。
 
-### 设置页
+---
 
-装好后 **设置 → 千问办公** 就是入口（`settings.section` 注册，order 13）。
-页面三块：登录（发起设备码、显示授权链接）、已登录账号（套餐/余额/有效期/移除）、
-可用模型清单。
+## 设置页能做什么
 
-图标目前是宿主的兜底齿轮——`settings.section` 这个 slot 只投影
-`id`/`order`/`label`，**没有 icon 字段**。magpie 用 MutationObserver 打补丁换图标，
-这里先不做：等宿主补上 icon 字段更划算。
+- **登录 / 移除账号**
+- **刷新** —— 重新拉一次你的剩余额度、套餐信息、下次续费日
+- **调上下文长度** —— 每个模型单独设，或者留「自动」
+- **看模型清单** —— 倍率、能不能看图、会不会思考，都是实时从上游读的，不是我写死的
 
-### 协议要点
+额度那个数字不会自己动，想看最新的就点一下刷新。
 
-**签名**：每个请求带 `Authorization: Bearer COSY.<payload>.<sig>`
+---
 
-```
-1. 账号信息 AES-128-CBC 加密（密钥=IV）→ info
-   该密钥再用 RSA 公钥加密 → key
-2. payload = base64(JSON{v1, requestId, info, cosyVersion, ideVersion:""})
-3. sig = md5(`${payload}\n${key}\n${ts}\n${body}\n${path}`)
-   path 去掉 /algo 前缀
-```
+## 常见问题
 
-**编码**：`Encode=1` 的请求体不是 JSON
+**Q：提示登录失效怎么办？**
 
-- 打乱的 64 字符表做 base64 变体（`$` 补齐）
-- 三段轮换：切成三等份，首尾交换
+点「移除」，再重新登录一次就行。插件不会自作主张删你数据，
+登录不上时旧信息会保留，等你重新登录后覆盖。
 
-**响应**：两层信封，`data:` 里是 JSON，真正的 OpenAI chunk 在 `body` 字段里。
+**Q：用着用着说「额度已用完」？**
 
-## 测试
+那是千问办公那边的账户额度真的没了，去官网看看，充值或者等续费。
 
-```sh
-node --test "test/*.test.ts"
-```
+**Q：有时候等很久没反应？**
 
-67 个测试：
+千问办公的服务端会排队。忙的时候要等一会儿，插件会自己重试两三次，
+超过还不行就会报错让 DSH 接手重试。不是你这边出问题了。
 
-| 文件 | 覆盖 |
-|---|---|
-| `codec.test.ts` | 编解码往返、多字节、补位边界 |
-| `cosy.test.ts` | 签名格式、RSA 包裹、md5 复算、机器标识 |
-| `auth.test.ts` | 假网关跑通设备码全流程、404 不误判、存储原子写 |
-| `body.test.ts` | tool 配对修复、cache 标记、小额度不思考 |
-| `stream.test.ts` | chunk 序列契约、错误码分类、编码 body |
-| `qwenwork.test.ts` | 端到端链路、多账号切换、错误信息 |
-| `entry.test.ts` | provider 注册、配置解析、缺服务不崩 |
+**Q：会不会影响我 DSH 里其他的模型？**
 
-### 真实链路验证
+不会。它只注册自己的 provider，跟别的模型互不干扰。
+而且插件内部所有异常都自己兜住了，就算它坏了，DSH 照样正常启动，
+只是少了这个模型来源。
 
-单测都用构造的假网关，**只有这个能证明协议真的对**：
+**Q：我的账号密码存在哪？会传给谁？**
 
-```sh
-node scripts/verify-real.mjs            # 三个模型各问一句
-node scripts/verify-real.mjs --tools    # 额外验证工具调用与多轮循环
-```
+只存在你自己电脑的 `~/.dsh-qwenwork-connect/accounts.json` 里，
+请求只发给千问办公自己的服务器。这个插件没有、也不可能有别的地方可发。
 
-会花掉一点额度，所以不放进 `npm test`。
+---
 
-## 风险
+## 它靠谱吗
 
-**一、协议会变。** 客户端版本号、RSA 密钥、字符表、头字段，任何一处变了
-插件就得跟着改。magpie 那边为跟 QwenWork 已经改了十几个版本。
+这套接口是照着千问办公桌面客户端的实际行为实现的，
+各个字段都是拿真实账号跑通验证过的，不是猜的。
 
-**二、绕过客户端校验。** 这违反服务条款，虽然你买的是正规订阅。
+但有一点要说清楚：**这是非官方接口**。千问办公没公开 API，
+所以哪天它改协议，插件就可能突然不能用了。真发生了来这里提 issue。
 
-**三、账号风控。** 指纹校验是活的。参考 OFM 的 `buddy` 渠道被腾讯
-`code 11128` 拦——同一类问题。
+另外，用非官方方式访问服务，理论上有违反服务条款的风险。
+你自己评估，用不用、怎么用，后果自负。
 
-## 致谢
+---
 
-协议实现移植自：
+## 写这个的时候参考了谁
 
-- [`@magpie-community/opencode-qoder-auth`](https://www.npmjs.com/package/@magpie-community/opencode-qoder-auth)（MIT）
-- [`yetone/magpie`](https://github.com/yetone/magpie)（MIT）
+这项目的做法是从几个成熟的开源项目里学来的，都遵守 MIT 协议：
 
-`codec` 层源自 CLIProxyAPI 的 qoder 支持（MIT）。
+- **[dsh-magpie-connect](https://github.com/bitxeno/dsh-magpie-connect)**
+  —— 怎么在 DSH 里写一个模型插件、怎么处理图片和缓存，基本是对着它做的。
+  作者：dsh-magpie-connect contributors
+- **[magpie](https://github.com/yetone/magpie)**
+  —— 千问办公这一家的请求怎么发、会话怎么标识、错误怎么分类，参考了它。
+  作者：yetone
+- **[@magpie-community/opencode-qoder-auth](https://github.com/magpie-community/plugins)**
+  —— 登录流程（扫码授权那一套）的原始实现。
+  作者：magpie-community contributors
 
-## 许可
+感谢这几位把东西开源出来。
 
-MIT
+---
+
+## 协议
+
+MIT，随便用。详见 [LICENSE](LICENSE)。
+
+第三方组件的版权声明也放在 LICENSE 文件末尾了。

@@ -41,7 +41,7 @@ function fakeCtx(opts: { withLlm?: boolean } = {}) {
 }
 
 test('插件元信息正确', () => {
-  assert.equal(name, 'dsh-qwenwork-connect')
+  assert.equal(name, 'dsh-qwenwork-connector')
   assert.deepEqual([...inject], ['llm'])
 })
 

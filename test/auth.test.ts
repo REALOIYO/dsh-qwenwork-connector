@@ -209,7 +209,7 @@ test('AccountStore 读写与去重', async () => {
 
 test('AccountStore.sync 真的打到上游并更新额度（而不是读本地快照）', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'qw-sync-'))
-  let remaining = 895.3636
+  let remaining = 1234.5678
   const gw = await fakeGateway({
     '/api/v1/adapter/user/account-context': () => ({
       status: 200,
@@ -226,7 +226,7 @@ test('AccountStore.sync 真的打到上游并更新额度（而不是读本地�
 
   try {
     const store = new AccountStore(dir)
-    // 登录时的旧快照：900；真实已降到 895.3636
+    // 登录时的旧快照：900；真实已降到 1234.5678
     await store.upsert({
       uid: 'u-1', access: 'tok', machineId: 'm1', label: 'a@b.c',
       plan: 'basic', balance: '900 credits',
@@ -236,8 +236,8 @@ test('AccountStore.sync 真的打到上游并更新额度（而不是读本地�
     assert.deepEqual(first.errors, [], '不该有错误')
     const a = first.accounts[0]
     assert.ok(a !== undefined, '应该有一个账号')
-    assert.equal(a.balance, '895.36 credits', '额度应来自上游')
-    assert.equal(a.quota?.remaining, 895.3636, '结构化额度也要带回来')
+    assert.equal(a.balance, '1234.57 credits', '额度应来自上游')
+    assert.equal(a.quota?.remaining, 1234.5678, '结构化额度也要带回来')
     assert.equal(a.period, 'monthly')
     assert.equal(a.renewsAt, Date.parse('2026-12-03T11:46:42Z'), '续费时间要解析出来')
     assert.ok(typeof a.syncedAt === 'number' && a.syncedAt > 0, '要记录同步时刻')

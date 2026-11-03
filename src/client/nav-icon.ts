@@ -102,8 +102,8 @@ export function installSettingsNavIcon(ctx: NavIconContext, resolveLabel: () => 
   if (typeof document === 'undefined') return
   ctx.effect(() => {
     const tag = document.createElement('style')
-    tag.dataset.plugin = 'dsh-qwenwork-connect'
-    tag.dataset.pluginCss = 'dsh-qwenwork-connect/settings-nav-icon'
+    tag.dataset.plugin = 'dsh-qwenwork-connector'
+    tag.dataset.pluginCss = 'dsh-qwenwork-connector/settings-nav-icon'
     tag.textContent = navIconCss(qwenMaskUrl())
     document.head.appendChild(tag)
 
@@ -138,5 +138,5 @@ export function installSettingsNavIcon(ctx: NavIconContext, resolveLabel: () => 
       }
       tag.remove()
     }
-  }, 'dsh-qwenwork-connect: settings nav icon')
+  }, 'dsh-qwenwork-connector: settings nav icon')
 }

@@ -1,5 +1,5 @@
 /**
- * dsh-qwenwork-connect — 插件入口。
+ * dsh-qwenwork-connector — 插件入口。
  *
  * 把千问办公（QwenWork）的模型注册为 DSH 的 LlmAdapter。
  *
@@ -19,7 +19,7 @@ import { PrefsStore, AUTO_WINDOW } from './adapter/prefs.ts'
 import type { AttachmentStore } from './adapter/images.ts'
 
 /** 插件名，同时是 cordis 里的 id。 */
-export const name = 'dsh-qwenwork-connect'
+export const name = 'dsh-qwenwork-connector'
 
 /** 唯一硬依赖：模型服务。没有它插件无法工作。 */
 export const inject = ['llm'] as const
@@ -101,7 +101,7 @@ export function apply(ctx: PluginContext, config: PluginConfig = {}): PluginHand
     return start(ctx, config, logger, ready)
   } catch (error) {
     logger.error(
-      `dsh-qwenwork-connect: 启动失败：${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+      `dsh-qwenwork-connector: 启动失败：${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
     )
     return { ready }
   }
@@ -117,7 +117,7 @@ function start(
   const cfg = resolveConfig(config)
 
   if (!ctx.llm || typeof ctx.llm.registerAdapter !== 'function') {
-    logger.error('dsh-qwenwork-connect: llm 服务不可用，适配器无法注册')
+    logger.error('dsh-qwenwork-connector: llm 服务不可用，适配器无法注册')
     return { ready }
   }
 
@@ -127,7 +127,7 @@ function start(
   // 附件服务是可选依赖：没有它时图片无法上行（会明确告知，而不是静默丢）
   const attachments = readAttachments(ctx)
   if (attachments === undefined) {
-    logger.warn('dsh-qwenwork-connect: 附件服务不可用，图片消息将无法发送')
+    logger.warn('dsh-qwenwork-connector: 附件服务不可用，图片消息将无法发送')
   }
 
   const adapter = new QwenWorkAdapter({
@@ -144,10 +144,10 @@ function start(
   //    registerAdapter 会抛错。宁可自己 FAILED，也不要把宿主启动拖下水。
   try {
     ctx.llm.registerAdapter([cfg.providerId], adapter)
-    logger.info(`dsh-qwenwork-connect: 已注册 provider "${cfg.providerId}"（${MODELS.length} 个模型）`)
+    logger.info(`dsh-qwenwork-connector: 已注册 provider "${cfg.providerId}"（${MODELS.length} 个模型）`)
   } catch (error) {
     logger.error(
-      `dsh-qwenwork-connect: provider "${cfg.providerId}" 注册失败（可能与已装插件同名）：${
+      `dsh-qwenwork-connector: provider "${cfg.providerId}" 注册失败（可能与已装插件同名）：${
         error instanceof Error ? error.message : String(error)
       }`,
     )
@@ -157,15 +157,15 @@ function start(
   // 2. 后台加载账号，同时拉一次真实模型目录
   void store.load().then(async (accounts: StoredAccount[]) => {
     if (accounts.length === 0) {
-      logger.info('dsh-qwenwork-connect: 还没有登录账号，请在「设置 → 千问办公」完成设备码登录')
+      logger.info('dsh-qwenwork-connector: 还没有登录账号，请在「设置 → 千问办公」完成设备码登录')
     } else {
-      logger.info(`dsh-qwenwork-connect: 已加载 ${accounts.length} 个账号`)
+      logger.info(`dsh-qwenwork-connector: 已加载 ${accounts.length} 个账号`)
       // 有账号才拉得动目录（接口要签名）
       await adapter.refreshModels(true).catch(() => {})
-      logger.info(`dsh-qwenwork-connect: 模型目录 ${adapter.models.length} 项（来自上游实测）`)
+      logger.info(`dsh-qwenwork-connector: 模型目录 ${adapter.models.length} 项（来自上游实测）`)
     }
   }).catch((error: unknown) => {
-    logger.error(`dsh-qwenwork-connect: 账号加载失败：${error instanceof Error ? error.message : String(error)}`)
+    logger.error(`dsh-qwenwork-connector: 账号加载失败：${error instanceof Error ? error.message : String(error)}`)
   })
 
   // 3. 设置页路由（可选：没有 connection 服务就跳过，不影响聊天）
@@ -212,7 +212,7 @@ function installRoutes(
       const connection = cctx.connection as { fetch?: { register?: (route: unknown) => () => void } } | undefined
       const register = connection?.fetch?.register
       if (typeof register !== 'function') {
-        logger.warn('dsh-qwenwork-connect: connection fetch 注册表不可用，设置页 API 已禁用')
+        logger.warn('dsh-qwenwork-connector: connection fetch 注册表不可用，设置页 API 已禁用')
         return
       }
 
@@ -240,7 +240,7 @@ function installRoutes(
           )
         } catch (error) {
           logger.warn(
-            `dsh-qwenwork-connect: ${path} 注册失败：${error instanceof Error ? error.message : String(error)}`,
+            `dsh-qwenwork-connector: ${path} 注册失败：${error instanceof Error ? error.message : String(error)}`,
           )
         }
       }
@@ -291,7 +291,7 @@ function installRoutes(
       registerRoute(`${API_PREFIX}/account/sync`, ['POST'], async () => {
         await store.load()
         const { accounts, errors } = await store.sync(cfg.gateway)
-        logger.info(`dsh-qwenwork-connect: 同步账号 ${accounts.length} 个，失败 ${errors.length} 个`)
+        logger.info(`dsh-qwenwork-connector: 同步账号 ${accounts.length} 个，失败 ${errors.length} 个`)
         return json(200, {
           ok: errors.length === 0,
           accounts: accounts.map(a => ({
@@ -318,7 +318,7 @@ function installRoutes(
           const raw = Number(body.window)
           const window = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : AUTO_WINDOW
           await adapter.setWindowPreference(model, window)
-          logger.info(`dsh-qwenwork-connect: ${model} 上下文档位设为 ${window === 0 ? '自动' : window}`)
+          logger.info(`dsh-qwenwork-connector: ${model} 上下文档位设为 ${window === 0 ? '自动' : window}`)
           return json(200, { ok: true, model, window })
         } catch (error) {
           return json(500, { ok: false, error: error instanceof Error ? error.message : String(error) })
@@ -346,11 +346,11 @@ function installRoutes(
           void signIn.wait()
             .then(async account => {
               await store.upsert(account)
-              logger.info(`dsh-qwenwork-connect: 账号已登录 ${account.label ?? account.uid}`)
+              logger.info(`dsh-qwenwork-connector: 账号已登录 ${account.label ?? account.uid}`)
             })
             .catch((error: unknown) => {
               logger.warn(
-                `dsh-qwenwork-connect: 登录未完成：${error instanceof Error ? error.message : String(error)}`,
+                `dsh-qwenwork-connector: 登录未完成：${error instanceof Error ? error.message : String(error)}`,
               )
             })
           return json(200, { ok: true, url: signIn.url, instructions: signIn.instructions })
@@ -366,14 +366,14 @@ function installRoutes(
           const uid = String(body.uid ?? '').trim()
           if (uid === '') return json(400, { ok: false, error: 'uid 必填' })
           await store.remove(uid)
-          logger.info(`dsh-qwenwork-connect: 账号已移除 ${uid}`)
+          logger.info(`dsh-qwenwork-connector: 账号已移除 ${uid}`)
           return json(200, { ok: true })
         } catch (error) {
           return json(500, { ok: false, error: error instanceof Error ? error.message : String(error) })
         }
       })
 
-      logger.info(`dsh-qwenwork-connect: 设置页 API 已挂载在 ${API_PREFIX}`)
+      logger.info(`dsh-qwenwork-connector: 设置页 API 已挂载在 ${API_PREFIX}`)
 
       // 卸载时摘掉路由
       if (typeof ctx.effect === 'function') {
@@ -391,7 +391,7 @@ function installRoutes(
     })
   } catch (error) {
     logger.warn(
-      `dsh-qwenwork-connect: 设置页 API 不可用：${error instanceof Error ? error.message : String(error)}`,
+      `dsh-qwenwork-connector: 设置页 API 不可用：${error instanceof Error ? error.message : String(error)}`,
     )
   }
 }

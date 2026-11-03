@@ -1,9 +1,9 @@
 {
-  "name": "dsh-qwenwork-connect",
-  "description": "QwenWork (千问办公) models for DeepSeek Harness: a native dsh-llm adapter, no gateway app",
+  "name": "dsh-qwenwork-connector",
+  "description": "千问办公（QwenWork）模型接入 DeepSeek Harness：自带设备码登录，直连官方接口，无需桌面客户端或网关程序",
   "version": "0.1.0",
   "entry": {
-    "name": "dsh-qwenwork-connect",
+    "name": "dsh-qwenwork-connector",
     "inject": [
       "llm"
     ]

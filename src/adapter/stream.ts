@@ -186,8 +186,15 @@ export function failure(status: number, text: string): Failure {
     return { status: 401, message: `登录已失效，请重新登录${said}`, code: 'AUTH', lapsed: true }
   }
 
-  // 6. 明确说额度（必须是额度字眼，不能只看 429）
-  if (/quota|credits?|usage limit|insufficient|balance/i.test(msg)) {
+  // 6. 明确说额度
+  //
+  // 这里必须收紧：429 并不等于额度用完（模型池忙也是 429），
+  // 而 "balance" 这种泛词容易误伤无关报错，所以只认额度/余额的组合语义。
+  if (
+    /quota|credits?|usage limit|insufficient (?:balance|quota|credits?)|out of credits?|exceeded.*(?:quota|limit)|余额不足|额度/i.test(
+      msg,
+    )
+  ) {
     return { status: 429, message: `用量已用完：${msg}`, code: 'QUOTA_EXCEEDED' }
   }
   // 429 但没有额度字眼：按限流处理，等一会儿再来
