@@ -422,15 +422,25 @@ export function buildBody(
   const base = QWENWORK_SYSTEM_PROMPT
   const systemText = systems.length ? `${base}\n\n${systems.join('\n\n')}` : base
 
-  // DSH 传下来的工具是**扁平**结构 { name, description, parameters }，
-  // 不是 OpenAI 的 { type:'function', function:{...} } 包装。
+  // 工具定义转换 —— **照抄 dsh-magpie-connect/src/adapter/messages.ts:toolsOf()**
   //
-  // 这里曾经只认包装形式，结果把宿主给的 23 个工具全部过滤掉了：
-  // 模型看不到工具 → 想调用却无从调起 → 只吐一段思考就结束，表现为
-  // 「几秒钟就截断、只有思维链没有正文」。两种形状都要接住。
+  //   const tools = options.tools?.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }))
+  //
+  // 它直接取 tool.name，不做任何过滤、不解包 —— 因为 DSH 宿主传的就是
+  // 扁平结构 { name, description, parameters }。
+  //
+  // 这里曾照抄 magpie **网关**（yetone/magpie 的 qoderBody）那行
+  //   .filter(t => t?.type === "function" && t.function?.name)
+  // 那行对网关是对的：它的输入来自 Cline / Roo / OpenCode 这些标准
+  // OpenAI 客户端，确实带包装。但 DSH 不是 OpenAI 客户端，
+  // 同一行搬过来就把 23 个工具全过滤没了 —— 模型看不到工具，想调却
+  // 无从调起，只吐一段思考就结束，表现为「几秒钟截断、只有思维链」。
+  //
+  // 教训：抄 DSH 插件（dsh-magpie-connect），别抄协议网关（magpie）。
+  // 两个项目同源但输入形状不同。
   const tools = (req.tool_choice !== 'none' ? (req.tools ?? []) : [])
     .map(t => normaliseTool(t))
-    .filter((t): t is { name: string; description: string; parameters: unknown } => t !== undefined)
+    .filter((t): t is NormalisedTool => t !== undefined)
 
   const budget = req.max_completion_tokens ?? req.max_tokens ?? 0
   const maxTokens = req.max_completion_tokens ?? req.max_tokens ?? 32000

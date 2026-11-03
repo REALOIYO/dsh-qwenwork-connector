@@ -122,12 +122,24 @@ if (wantTools) {
       const c0 = t.calls[0]
       console.log(green(`✔ ${c0.name} ${c0.arguments}`) + dim(` finish=${t.finish?.kind}`))
 
+      // 回放历史必须自洽：用户问的就是刚才那次调用，工具结果也要跟
+      // 被调用的路径对得上。
+      //
+      // 这里以前写死「问 /etc/hostname」，但上一轮实际调的是 /etc/hosts，
+      // 模型看到矛盾的上下文就干脆不答，被误报成「第二轮没有文字」。
+      let askedPath = '/etc/hosts'
+      try {
+        askedPath = JSON.parse(c0.arguments)?.path ?? askedPath
+      } catch {
+        // 参数不是 JSON 就用默认值
+      }
+
       console.log(dim('— 多轮循环 —'))
       process.stdout.write('带工具结果再问           ')
       const history = [
-        { role: 'user', content: '请读一下 /etc/hostname，然后告诉我内容' },
+        { role: 'user', content: `请读一下 ${askedPath}，然后告诉我内容` },
         { role: 'assistant', content: t.text || null, tool_calls: t.calls.map(c => ({ id: c.id, type: 'function', function: { name: c.name, arguments: c.arguments } })) },
-        { role: 'tool', tool_call_id: c0.id, content: 'my-machine' },
+        { role: 'tool', tool_call_id: c0.id, content: 'my-machine\n' },
       ]
       const t2 = await askWithTools(model, '', tools, history)
       if (t2.text.trim() === '') {
