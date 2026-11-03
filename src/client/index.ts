@@ -12,6 +12,7 @@
  */
 
 import { NS, EN, ZH, setLocaleRuntime, text, type LocaleRuntime } from './i18n.ts'
+import { installSettingsNavIcon } from './nav-icon.ts'
 import { QwenWorkSettings } from './page.tsx'
 
 /** slot 服务的最小面。 */
@@ -23,8 +24,13 @@ interface Slots {
   ): unknown
 }
 
-/** localStorage 的最小面。 */
-interface ClientLocale extends LocaleRuntime {
+/**
+ * locale 服务：既支持一次性注册中英两套，也支持按语言注册（老宿主）。
+ *
+ * 用交叉类型而不是 extends——两边的 `register` 重载不兼容，
+ * 继承会被 TS 判为冲突，但运行时确实是同一个对象支持两种调用。
+ */
+type ClientLocale = LocaleRuntime & {
   register(ns: string, lang: string, dict: Record<string, string>): () => void
 }
 
@@ -85,6 +91,18 @@ export function apply(ctx: ClientContext): void {
       QwenWorkSettings,
     ),
   )
+
+  // `settings.section` 不投影 icon，宿主会给这一行画兜底齿轮。
+  // 认领那一行并换成千问的标；见 nav-icon.ts 里的说明与删除条件。
+  if (typeof ctx.effect === 'function') {
+    try {
+      installSettingsNavIcon(ctx as unknown as { effect(fn: () => () => void, label?: string): unknown }, () =>
+        text('nav'),
+      )
+    } catch {
+      // 图标是装饰，装不上不影响功能
+    }
+  }
 }
 
 /** 必须有这两个服务才能工作。 */

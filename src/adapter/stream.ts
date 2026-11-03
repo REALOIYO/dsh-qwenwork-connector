@@ -132,7 +132,8 @@ export function failure(status: number, text: string): Failure {
     const n = Number(queue?.retryAfterSeconds)
     const wait = Number.isFinite(n) && n > 0 ? Math.ceil(n) : BUSY_WAIT
     const model = queue?.modelKey ? ` for ${queue.modelKey}` : ''
-    const ahead = Number(queue?.queueCount) > 0 ? `, ${Math.floor(Number(queue.queueCount))} ahead` : ''
+    const aheadCount = Number(queue?.queueCount)
+    const ahead = Number.isFinite(aheadCount) && aheadCount > 0 ? `, ${Math.floor(aheadCount)} ahead` : ''
     const what = queue?.isQueued === true ? 'queued the request' : 'is busy'
     return {
       status: 503,

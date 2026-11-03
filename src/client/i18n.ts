@@ -121,8 +121,8 @@ export function text(key: string, params?: Record<string, string | number>): str
 
 /** 语言变化时触发重渲染，避免切语言后页面还显示旧文案。 */
 export function useLocaleRevision(): number {
-  return useSyncExternalStore(
-    (listener) => {
+  return useSyncExternalStore<number>(
+    (listener: () => void) => {
       try {
         return runtime?.subscribe?.(listener) ?? (() => {})
       } catch {
