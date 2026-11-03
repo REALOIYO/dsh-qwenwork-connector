@@ -390,6 +390,15 @@ export async function* toStreamChunks(
 
       let slot = toolCalls.get(upstreamIndex)
       if (!slot) {
+        // 这里**不要**顺手把还开着的 text/reasoning 块收口。
+        //
+        // DSH 的 BlockAssembler（dsh-llm/lib/types/assembler.js）是按 index
+        // 分槽的：`partials` 是 `Map<index, partial>`，delta 自带 index，
+        // 各进各的槽。多个块同时打开是合法状态，不存在「交错会写错块」。
+        //
+        // 反过来，在这里收口是有害的：模型常在正文流中间发起工具调用，
+        // 收口会把一段连续正文切成多个 text 块（实测 1 块变 3 块）。
+        // 真实约束只有一条：block-start 必须配到 block-end，见函数末尾。
         slot = { id: id || `call_${upstreamIndex}_${toolCalls.size}`, name: '', args: '' }
         toolCalls.set(upstreamIndex, slot)
         toolIndexes.set(upstreamIndex, nextIndex++)

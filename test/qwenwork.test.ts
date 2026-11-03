@@ -81,7 +81,13 @@ test('7 个契约方法形状正确', async () => {
   assert.equal(info.id, 'qwenwork')
   assert.equal(info.name, '千问办公')
 
-  assert.equal(adapter.providerRetryPolicy('qwenwork'), undefined)
+  // 重试策略必须自己声明：DSH 默认按 code 字符串匹配，
+  // 不认识 MODEL_POOL_BUSY / QUEUED 就会当场判失败（「跑一会儿突然停」的根因）
+  const policy = adapter.providerRetryPolicy('qwenwork')
+  assert.equal(policy.mode, 'normal')
+  assert.ok(policy.maxRetries >= 1)
+  assert.ok(policy.retryableCodes.includes('MODEL_POOL_BUSY'), '模型池忙必须可重试')
+  assert.ok(policy.retryableCodes.includes('QUEUED'), '上游排队必须可重试')
   assert.equal(adapter.imageRequestPricing('qwenwork', 'flash'), undefined)
 
   const listed = adapter.listModels('qwenwork')

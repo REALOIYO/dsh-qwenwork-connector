@@ -154,9 +154,33 @@ export class QwenWorkAdapter {
     return { id: provider, name: this.#displayName }
   }
 
-  /** 用宿主默认重试策略。 */
-  providerRetryPolicy(_provider: string): undefined {
-    return undefined
+  /**
+   * 重试策略。
+   *
+   * 不能返回 `undefined` 用宿主默认值：DSH 的默认 `retryableCodes` 只有
+   * `EMPTY_RESPONSE / RATE_LIMIT / SERVER / TIMEOUT / TRANSPORT`
+   * （dsh-llm/lib/types/retry-policy.js），**按 code 字符串匹配**，不看 HTTP 状态码。
+   *
+   * 而千问办公最常见的两种瞬时失败恰恰不在这张表里：
+   *   - `MODEL_POOL_BUSY` —— 上游 429「All models failed」，多轮 agent 循环
+   *     第 3~4 轮就会撞上，账号额度明明还很充足
+   *   - `QUEUED` —— 上游排队，返回里有 retryAfterSeconds
+   *
+   * 不声明的话，插件自己重试两轮后抛出去，DSH 一看 code 不认识就当场判失败——
+   * 表现就是「跑一会儿突然停」，父 agent 中断、子代理还在跑。
+   */
+  providerRetryPolicy(_provider: string): {
+    mode: 'normal'
+    maxRetries: number
+    retryableCodes: string[]
+  } {
+    return {
+      mode: 'normal',
+      // 宿主侧再多试几轮。插件内部已经等过最多 2×20 秒，
+      // 这里放宽到 4 次，把「池子忙一阵就恢复」的情况兜住。
+      maxRetries: 4,
+      retryableCodes: ['MODEL_POOL_BUSY', 'QUEUED', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'RATE_LIMIT'],
+    }
   }
 
   /** 千问办公没有单独的视觉计费。 */

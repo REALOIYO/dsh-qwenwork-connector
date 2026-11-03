@@ -2,6 +2,11 @@ node_modules/
 *.log
 *.tsbuildinfo
 .DS_Store
+
+# 临时验证脚本、抓下来的原始响应，不进仓库
+_tmp/
+
+# 一次性排查探针（scripts/_probe-*.mjs），验证完就该删或改名
 _probe-*.mjs
 
 # lib/ **故意不忽略**：这个插件是直接从 GitHub 装的（file: / link:），

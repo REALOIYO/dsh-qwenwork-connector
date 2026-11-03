@@ -381,3 +381,43 @@ test('id 首帧就给时不回退', async () => {
   }
   assert.equal((call as { id: string } | null)?.id, 'FIRST_ID')
 })
+
+test('回归：正文中间插工具调用时，正文不能被切成多个 text 块', async () => {
+  // DSH 的 BlockAssembler 按 index 分槽（partials 是 Map），多个块同时打开
+  // 是合法状态，delta 各进各的槽不会串。所以**不能**为了「只留一个活跃块」
+  // 而在工具块开始前把 text 收口——那样会把一段连续正文切成几块。
+  // 曾经这么改过，实测 1 个 text 块变成 3 个。
+  const frames = [
+    `data: ${JSON.stringify({ body: JSON.stringify({ choices: [{ delta: { content: '我先看看' } }] }) })}`,
+    `data: ${JSON.stringify({ body: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'a', function: { name: 'read', arguments: '{}' } }] } }] }) })}`,
+    `data: ${JSON.stringify({ body: JSON.stringify({ choices: [{ delta: { content: '然后再改' } }] }) })}`,
+    `data: ${JSON.stringify({ body: JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] }) })}`,
+    'data: [DONE]',
+  ].join('\n\n')
+
+  const textStarts: number[] = []
+  let text = ''
+  for await (const c of toStreamChunks(streamOf(frames), 'm')) {
+    if (c.type === 'block-start' && c.blockType === 'text') textStarts.push(c.index)
+    if (c.type === 'text-delta') text += c.text
+  }
+  assert.equal(textStarts.length, 1, `正文只应有一个 text 块，实际 ${textStarts.length} 个`)
+  assert.equal(text, '我先看看然后再改', '正文不能因翻块丢失')
+})
+
+test('回归：多工具并行时 start/end 必须成对（允许同时打开）', async () => {
+  const frames = [
+    `data: ${JSON.stringify({ body: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'a', function: { name: 'f1', arguments: '{}' } }] } }] }) })}`,
+    `data: ${JSON.stringify({ body: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 1, id: 'b', function: { name: 'f2', arguments: '{}' } }] } }] }) })}`,
+    `data: ${JSON.stringify({ body: JSON.stringify({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }) })}`,
+    'data: [DONE]',
+  ].join('\n\n')
+
+  const starts: number[] = []
+  const ends: number[] = []
+  for await (const c of toStreamChunks(streamOf(frames), 'm')) {
+    if (c.type === 'block-start') starts.push(c.index)
+    if (c.type === 'block-end') ends.push(c.index)
+  }
+  assert.deepEqual([...starts].sort((a, b) => a - b), [...ends].sort((a, b) => a - b), 'start/end 必须一一配对')
+})

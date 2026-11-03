@@ -11,6 +11,7 @@
  */
 
 import { readFile, writeFile, mkdir, rename } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 /** 「自动」用这个值表示：不固定，按消息大小挑。 */
@@ -31,6 +32,36 @@ export class PrefsStore {
 
   constructor(dataDir: string) {
     this.#path = join(dataDir, 'prefs.json')
+    // 构造时就同步读一次。
+    //
+    // 这不是冗余：`apply()` 是同步函数，没法 await 一次 load；而
+    // `resolveModel()` / `buildBody()` 都是同步取档位的。若等设置页的
+    // `/status` 路由去触发 `load()`，冷启动（重启后没打开设置页）这段时间里
+    // 偏好一直是空表 —— UI 按上游最大值显示 1M，实际请求却按「自动」发，
+    // 两边对不上。文件很小（几十字节），同步读没有性能顾虑。
+    this.#primeSync()
+  }
+
+  /** 同步读盘。失败（含首次运行无文件）一律当作空偏好。 */
+  #primeSync(): void {
+    try {
+      const raw = readFileSync(this.#path, 'utf8')
+      this.#applyParsed(JSON.parse(raw) as Partial<StoredPrefs>)
+    } catch {
+      // 没有文件 / 内容坏了都按空偏好处理，不影响启动
+    }
+  }
+
+  /** 把解析结果并进内存表（两边共用的校验逻辑）。 */
+  #applyParsed(parsed: Partial<StoredPrefs>): void {
+    const windows = parsed?.windows
+    if (windows !== null && windows !== undefined && typeof windows === 'object') {
+      for (const [key, value] of Object.entries(windows)) {
+        if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+          this.#windows[key] = Math.floor(value)
+        }
+      }
+    }
   }
 
   get path(): string {
@@ -41,15 +72,7 @@ export class PrefsStore {
     if (this.#loaded) return
     try {
       const raw = await readFile(this.#path, 'utf8')
-      const parsed = JSON.parse(raw) as Partial<StoredPrefs>
-      const windows = parsed?.windows
-      if (windows !== null && windows !== undefined && typeof windows === 'object') {
-        for (const [key, value] of Object.entries(windows)) {
-          if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
-            this.#windows[key] = Math.floor(value)
-          }
-        }
-      }
+      this.#applyParsed(JSON.parse(raw) as Partial<StoredPrefs>)
     } catch {
       // 首次运行没有文件是正常的
     }
