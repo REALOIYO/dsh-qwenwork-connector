@@ -58,18 +58,32 @@ https://gateway.qwenwork.cn/device/selectAccounts?challenge=...&client_id=...&re
 
 ```
 src/
-├── index.ts              插件入口：注册 provider、挂设置页 API
+├── index.ts              宿主半边：注册 provider、挂 REST API
+├── client/               前端半边：设置侧边栏入口
+│   ├── index.ts          注册 settings.section
+│   ├── page.tsx          登录 / 账号 / 模型 三块
+│   └── i18n.ts           中英文案
 └── adapter/
     ├── codec.ts          Encode=1 的 body 编解码（纯函数）
     ├── cosy.ts           COSY 信封签名（AES + RSA + md5）
     ├── auth.ts           设备码登录、账号存储
     ├── body.ts           DSH 请求 → agent_chat_generation
-    ├── stream.ts         SSE → DSH StreamChunk
+    ├── stream.ts         SSE → DSH StreamChunk，失败分类
     └── qwenwork.ts       7 个适配器契约方法
 ```
 
 分层是为了能独立测：`codec` 是纯函数，`cosy` 只依赖 crypto，`stream` 和
 `body` 能吃构造的字节流，只有 `qwenwork` 需要假服务器。
+
+### 设置页
+
+装好后 **设置 → 千问办公** 就是入口（`settings.section` 注册，order 13）。
+页面三块：登录（发起设备码、显示授权链接）、已登录账号（套餐/余额/有效期/移除）、
+可用模型清单。
+
+图标目前是宿主的兜底齿轮——`settings.section` 这个 slot 只投影
+`id`/`order`/`label`，**没有 icon 字段**。magpie 用 MutationObserver 打补丁换图标，
+这里先不做：等宿主补上 icon 字段更划算。
 
 ### 协议要点
 
@@ -96,16 +110,28 @@ src/
 node --test "test/*.test.ts"
 ```
 
-61 个测试，分五组：
+67 个测试：
 
 | 文件 | 覆盖 |
 |---|---|
 | `codec.test.ts` | 编解码往返、多字节、补位边界 |
 | `cosy.test.ts` | 签名格式、RSA 包裹、md5 复算、机器标识 |
-| `auth.test.ts` | 假网关跑通设备码全流程、存储原子写 |
+| `auth.test.ts` | 假网关跑通设备码全流程、404 不误判、存储原子写 |
 | `body.test.ts` | tool 配对修复、cache 标记、小额度不思考 |
-| `stream.test.ts` | chunk 序列契约、错误归类、编码 body |
+| `stream.test.ts` | chunk 序列契约、错误码分类、编码 body |
 | `qwenwork.test.ts` | 端到端链路、多账号切换、错误信息 |
+| `entry.test.ts` | provider 注册、配置解析、缺服务不崩 |
+
+### 真实链路验证
+
+单测都用构造的假网关，**只有这个能证明协议真的对**：
+
+```sh
+node scripts/verify-real.mjs            # 三个模型各问一句
+node scripts/verify-real.mjs --tools    # 额外验证工具调用与多轮循环
+```
+
+会花掉一点额度，所以不放进 `npm test`。
 
 ## 风险
 
