@@ -35,7 +35,7 @@ test('签名头包含 Authorization 且格式为 COSY.payload.sig 三段', () =>
   assert.equal(parts.length, 3, 'Authorization 应为 Bearer COSY.payload.sig')
   assert.ok(h.Authorization.startsWith('Bearer COSY.'), '缺 Bearer COSY. 前缀')
   // payload 应是合法 base64 JSON
-  const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'))
+  const payload = JSON.parse(Buffer.from(parts[1]!, 'base64').toString('utf8'))
   assert.equal(payload.version, 'v1')
   assert.equal(payload.cosyVersion, COSY_VERSION)
   assert.equal(payload.ideVersion, '')
@@ -44,7 +44,7 @@ test('签名头包含 Authorization 且格式为 COSY.payload.sig 三段', () =>
 
 test('Cosy-Key 是 RSA 包裹的 AES 密钥（1024 位密文）', () => {
   const h = cosyHeaders('https://gateway.qwenwork.cn/algo/api/v1/x', account, 'BODY')
-  const wrapped = Buffer.from(h['Cosy-Key'], 'base64')
+  const wrapped = Buffer.from(h['Cosy-Key']!, 'base64')
   // 1024 位 RSA 的密文恒为 128 字节
   assert.equal(wrapped.length, 128, `RSA-1024 密文应为 128 字节，得到 ${wrapped.length}`)
 })
@@ -53,8 +53,8 @@ test('同一请求内 Cosy-Key 与 payload.info 配对，且不同请求会换�
   const a = cosyHeaders('https://gateway.qwenwork.cn/algo/api/v1/x', account, 'BODY')
   const b = cosyHeaders('https://gateway.qwenwork.cn/algo/api/v1/x', account, 'BODY')
   assert.notEqual(a['Cosy-Key'], b['Cosy-Key'], '每次请求应换新的 AES 密钥')
-  const pa = JSON.parse(Buffer.from(a.Authorization.split('.')[1], 'base64').toString('utf8'))
-  const pb = JSON.parse(Buffer.from(b.Authorization.split('.')[1], 'base64').toString('utf8'))
+  const pa = JSON.parse(Buffer.from(a.Authorization.split('.')[1]!, 'base64').toString('utf8'))
+  const pb = JSON.parse(Buffer.from(b.Authorization.split('.')[1]!, 'base64').toString('utf8'))
   assert.notEqual(pa.requestId, pb.requestId, '每次应换 requestId')
   assert.notEqual(pa.info, pb.info, '每次应换 info（新密钥加密）')
   assert.notEqual(a.Authorization, b.Authorization, '签名应随请求变化')
@@ -77,8 +77,8 @@ test('/algo 前缀在签名 path 中被去掉', () => {
   const ts = 1700000000
   const withAlgo = cosyHeaders('https://gateway.qwenwork.cn/algo/api/v1/x', account, 'B', ts)
   const without = cosyHeaders('https://gateway.qwenwork.cn/api/v1/x', account, 'B', ts)
-  const p1 = JSON.parse(Buffer.from(withAlgo.Authorization.split('.')[1], 'base64').toString('utf8'))
-  const p2 = JSON.parse(Buffer.from(without.Authorization.split('.')[1], 'base64').toString('utf8'))
+  const p1 = JSON.parse(Buffer.from(withAlgo.Authorization.split('.')[1]!, 'base64').toString('utf8'))
+  const p2 = JSON.parse(Buffer.from(without.Authorization.split('.')[1]!, 'base64').toString('utf8'))
   assert.equal(p1.version, p2.version)
   // 真正的 path 差异体现在 sig 上，这里验证两者都不抛错且结构一致
   assert.ok(withAlgo.Authorization.startsWith('Bearer COSY.'))
@@ -126,9 +126,9 @@ test('machineHostname 处理 ASCII / 空 / 超长', () => {
 
 test('客户端身份头齐全', () => {
   const h = clientHeaders()
-  assert.match(h['User-Agent'], /^qoderwork\/\d+\.\d+\.\d+$/)
-  assert.ok(h['X-Request-Id'].length > 0)
-  assert.ok(h['X-QwenWork-Version'].length > 0)
-  assert.ok(h['X-QwenWork-Release-Version'].length > 0)
+  assert.match(h['User-Agent']!, /^qoderwork\/\d+\.\d+\.\d+$/)
+  assert.ok(h['X-Request-Id']!.length > 0)
+  assert.ok(h['X-QwenWork-Version']!.length > 0)
+  assert.ok(h['X-QwenWork-Release-Version']!.length > 0)
   assert.equal(h['X-QwenWork-Channel'], 'stable')
 })

@@ -104,8 +104,9 @@ export function startDeviceSignIn(gateway = GATEWAY, pollInterval = DEFAULT_POLL
           const r = await openapi(gateway, '/api/v1/deviceToken/poll', {
             query: { nonce, verifier, challenge_method: 'S256' },
           })
-          if (r.status === 200 && String(r.json?.token ?? '').trim() !== '') {
-            device = r.json as DeviceToken
+          const body = r.json as { token?: unknown } | null
+          if (r.status === 200 && String(body?.token ?? '').trim() !== '') {
+            device = body as DeviceToken
             break
           }
           if (r.status >= 400 && r.status < 500 && r.status !== 408 && r.status !== 429) {

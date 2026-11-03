@@ -9,10 +9,15 @@
  * 保持插件运行时零依赖。
  */
 
-import { build } from 'esbuild'
+// esbuild 是构建期依赖，不写进 package.json（保持插件运行时零依赖）。
+// 允许用 QWENWORK_ESBUILD 指定已安装的 esbuild 目录，供沙箱/CI 复用。
+const esbuildSpecifier = process.env.QWENWORK_ESBUILD
+  ? pathToFileURL(join(process.env.QWENWORK_ESBUILD, 'lib/main.js')).href
+  : 'esbuild'
+const { build } = await import(esbuildSpecifier)
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
 
