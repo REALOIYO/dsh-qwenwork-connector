@@ -32,8 +32,8 @@ const REDIRECT = 'qwenwork-cn://'
 
 /** 设备码有效期，超时即放弃。 */
 const SIGN_IN_TIMEOUT = 15 * 60 * 1000
-/** 轮询间隔。 */
-const POLL_INTERVAL = 2000
+/** 轮询间隔（默认 2 秒，测试可调小）。 */
+const DEFAULT_POLL_INTERVAL = 2000
 
 /** 一个已登录的账号。 */
 export interface StoredAccount extends QwenWorkAccount {
@@ -68,8 +68,11 @@ export interface DeviceSignIn {
  *
  * 返回后立刻可以拿到 `url` 给用户；`wait()` 会一直轮询到成功或超时。
  * 轮询期间的网络抖动不会中断流程（吞掉后重试），只有超时和明确的失败会抛。
+ *
+ * @param gateway      网关地址
+ * @param pollInterval 轮询间隔毫秒，测试可调小
  */
-export function startDeviceSignIn(gateway = GATEWAY): DeviceSignIn {
+export function startDeviceSignIn(gateway = GATEWAY, pollInterval = DEFAULT_POLL_INTERVAL): DeviceSignIn {
   const verifier = b64url(randomBytes(64))
   const challenge = b64url(createHash('sha256').update(verifier).digest())
   const nonce = randomUUID()
@@ -114,7 +117,7 @@ export function startDeviceSignIn(gateway = GATEWAY): DeviceSignIn {
           if (error instanceof Error && error.message.startsWith('qwenwork:')) throw error
           lastError = error instanceof Error ? error.message : String(error)
         }
-        await sleep(POLL_INTERVAL)
+        await sleep(pollInterval)
       }
 
       const token = String(device.token).trim()

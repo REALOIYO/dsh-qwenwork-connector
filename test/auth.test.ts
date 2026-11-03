@@ -71,7 +71,7 @@ test('设备码登录全流程：poll 成功后读 account-context 组装账号'
   })
 
   try {
-    const signIn = startDeviceSignIn(gw.base)
+    const signIn = startDeviceSignIn(gw.base, 20)
     // 授权地址要带上完整参数
     const u = new URL(signIn.url)
     assert.equal(u.pathname, '/device/selectAccounts')
@@ -102,7 +102,7 @@ test('poll 返回 4xx（非临时）立即失败，不空转', async () => {
     '/api/v1/deviceToken/poll': () => ({ status: 403, json: { message: 'denied' } }),
   })
   try {
-    const signIn = startDeviceSignIn(gw.base)
+    const signIn = startDeviceSignIn(gw.base, 20)
     await assert.rejects(signIn.wait(), /授权被拒绝/)
   } finally {
     await gw.close()
@@ -118,7 +118,7 @@ test('account-context 不可用时，用 poll 里的 user_id 兜底', async () =
     // account-context 不在路由表 → 404
   })
   try {
-    const signIn = startDeviceSignIn(gw.base)
+    const signIn = startDeviceSignIn(gw.base, 20)
     const account = await signIn.wait()
     assert.equal(account.uid, 'u-2', '应回退到 poll 返回的 user_id')
     assert.equal(account.access, 'tok-2')
@@ -132,7 +132,7 @@ test('拿不到 uid 要明确报错（签名必需）', async () => {
     '/api/v1/deviceToken/poll': () => ({ status: 200, json: { token: 'tok-3' } }),
   })
   try {
-    const signIn = startDeviceSignIn(gw.base)
+    const signIn = startDeviceSignIn(gw.base, 20)
     await assert.rejects(signIn.wait(), /用户 id/)
   } finally {
     await gw.close()
