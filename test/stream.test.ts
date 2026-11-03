@@ -252,3 +252,50 @@ test('「额度/余额」中文提示也要认成额度用完', async () => {
     return true
   })
 })
+
+test('回归：思考块与正文块的 index 必须不同（曾经都从 0 开始撞号）', async () => {
+  // 模型「先想再答」：reasoning 用 index 0，随后 text 又从 0 开始。
+  // DSH 的 BlockAssembler 按 index 认块，撞号会让正文 delta 灌进
+  // 已关闭的 reasoning 块、整段丢失 —— 表现为「只有思维链没有正文」。
+  const frames = [
+    `data: ${JSON.stringify({ body: JSON.stringify({ choices: [{ delta: { reasoning_content: '想一想' } }] }) })}`,
+    `data: ${JSON.stringify({ body: JSON.stringify({ choices: [{ delta: { content: '答案是' } }] }) })}`,
+    `data: ${JSON.stringify({ body: JSON.stringify({ choices: [{ delta: { content: '42' } }] }) })}`,
+    `data: ${JSON.stringify({ body: JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] }) })}`,
+    'data: [DONE]',
+  ].join('\n\n')
+
+  const seen = new Set<number>()
+  const starts: Array<{ index: number; blockType: string }> = []
+  for await (const c of toStreamChunks(streamOf(frames), 'm')) {
+    if (c.type === 'block-start') {
+      starts.push({ index: c.index, blockType: c.blockType })
+      assert.ok(!seen.has(c.index), `index ${c.index} 被重复使用（${c.blockType}）`)
+      seen.add(c.index)
+    }
+  }
+  assert.equal(starts.length, 2, '应有思考与正文两个块')
+  assert.deepEqual(starts.map(s => s.blockType), ['reasoning', 'text'])
+  assert.notEqual(starts[0]!.index, starts[1]!.index, '两个块的 index 必须不同')
+})
+
+test('回归：正文内容完整，不因翻块丢失', async () => {
+  const frames = [
+    `data: ${JSON.stringify({ body: JSON.stringify({ choices: [{ delta: { reasoning_content: 'thinking' } }] }) })}`,
+    `data: ${JSON.stringify({ body: JSON.stringify({ choices: [{ delta: { content: 'Hello' } }] }) })}`,
+    `data: ${JSON.stringify({ body: JSON.stringify({ choices: [{ delta: { content: ' world' } }] }) })}`,
+    'data: [DONE]',
+  ].join('\n\n')
+
+  let text = ''
+  const ends: Array<{ type: string; text: string }> = []
+  for await (const c of toStreamChunks(streamOf(frames), 'm')) {
+    if (c.type === 'text-delta') text += c.text
+    if (c.type === 'block-end' && (c.block.type === 'text' || c.block.type === 'reasoning')) {
+      ends.push({ type: c.block.type, text: c.block.text })
+    }
+  }
+  assert.equal(text, 'Hello world', '正文一个字都不能少')
+  const textBlock = ends.find(e => e.type === 'text')
+  assert.equal(textBlock?.text, 'Hello world', 'block-end 里的正文也要完整')
+})

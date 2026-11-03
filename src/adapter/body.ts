@@ -29,11 +29,31 @@ export type { ModelEntry }
 export const QWENWORK_SYSTEM_PROMPT =
   'You are QwenWork (qw), a helpful assistant. Use the instructions below and the tools available to you to assist the user.'
 
-/** DSH 传来的消息（只声明用到的字段）。 */
+/**
+ * DSH 传来的消息。
+ *
+ * **工具相关的形状不是 OpenAI 的**，这是照抄 `dsh-magpie-connect` 的
+ * `HarnessBlock` / `HarnessMessage` 得来的（那是对的，因为它就是给 DSH 写的）：
+ *
+ *   - 工具调用是 assistant `content` 里的 `{ type:'tool-call', id, name, arguments }`
+ *     块，**不是** `message.tool_calls` 数组
+ *   - 工具结果 ID 在消息上是驼峰 `toolCallId`，**不是**下划线 `tool_call_id`
+ *
+ * 早期版本只认 OpenAI 那套，结果：assistant 的工具轮被整轮丢弃（tool-call
+ * 块没有 text，textOf 取到空串），工具结果被并回 user 轮当纯文本 ——
+ * 模型永远看不到自己调过什么、拿到了什么。与「23 个工具被过滤」同一根因。
+ *
+ * 两种形状都保留：DSH 的为主，OpenAI 的形状仍然接住（有些调用方会那么发）。
+ */
 export interface HarnessMessage {
   role: string
   content: unknown
+  /** 工具结果消息上的工具调用 ID（驼峰，DSH 用这个）。 */
+  toolCallId?: string
+  /** 老式下划线写法，仍然接受。 */
   tool_call_id?: string
+  isError?: boolean
+  /** OpenAI 风格的 assistant 工具调用数组，仍然接受。 */
   tool_calls?: Array<{
     id?: string
     type?: string
@@ -43,6 +63,14 @@ export interface HarnessMessage {
   reasoning_content?: string
   reasoning?: string
 }
+
+/** DSH content 数组里的一个块（只声明用到的）。 */
+type HarnessBlock =
+  | { type: 'text'; text: string }
+  | { type: 'reasoning'; text: string }
+  | { type: 'tool-call'; id: string; name: string; arguments?: unknown }
+  | { type: 'tool-result'; toolCallId: string; content?: unknown; isError?: boolean }
+  | { type: string; [key: string]: unknown }
 
 /** 发一次聊天的输入。 */
 export interface ChatRequest {
@@ -57,9 +85,21 @@ export interface ChatRequest {
    */
   tools?: Array<Record<string, unknown>>
   tool_choice?: string
+  toolChoice?: string
+  /**
+   * DSH 契约用**驼峰**：`maxTokens` / `reasoningEffort` / `system`。
+   *
+   * 早期版本只读下划线的 `max_tokens` / `reasoning_effort`，宿主传的驼峰
+   * 字段一个也读不到 —— 于是输出上限永远走默认 32000，用户在 DSH 里
+   * 调的输出长度和思考强度全部被静默忽略。两种命名都接住，别只留一种。
+   */
+  system?: string
+  maxTokens?: number
+  temperature?: number
+  reasoningEffort?: string
+  /** OpenAI 风格的下划线命名，同样接受。 */
   max_tokens?: number
   max_completion_tokens?: number
-  temperature?: number
   reasoning_effort?: string
 }
 
@@ -69,6 +109,13 @@ type Block =
   | { type: 'image_url'; image_url: { url: string } }
 
 /** 取纯文本（字符串或块数组里的文本块）。 */
+/** 把 content 统一成块数组（字符串内容视作单个文本块），不做图片解析。 */
+function rawBlocksOf(content: unknown): HarnessBlock[] {
+  if (typeof content === 'string') return [{ type: 'text', text: content }]
+  if (!Array.isArray(content)) return []
+  return content.filter((b): b is HarnessBlock => typeof b === 'object' && b !== null)
+}
+
 export function textOf(content: unknown): string {
   if (typeof content === 'string') return content
   if (!Array.isArray(content)) return ''
@@ -164,7 +211,7 @@ export function qwenworkMessages(
 
     if (m.role === 'tool') {
       const text = textOf(m.content)
-      const named = String(m.tool_call_id ?? '').trim()
+      const named = String(m.toolCallId ?? m.tool_call_id ?? '').trim()
       // 优先认领同名 id；丢了 id 的按顺序认领最早未答的那个
       let at = named ? open.indexOf(named) : -1
       if (at < 0) at = 0
@@ -180,20 +227,45 @@ export function qwenworkMessages(
     }
 
     if (m.role === 'assistant') {
-      const calls = Array.isArray(m.tool_calls) ? m.tool_calls : []
-      if (calls.length > 0) {
+      // 工具调用有两个来源，都要收：
+      //   1. DSH 形状：content 里的 { type:'tool-call', id, name, arguments } 块
+      //   2. OpenAI 形状：message.tool_calls 数组
+      // 只读第 2 种的话，DSH 的整个工具轮会被当成「没有文本的空轮」丢掉。
+      const fromContent = rawBlocksOf(m.content).filter(
+        (b): b is Extract<HarnessBlock, { type: 'tool-call' }> => b?.type === 'tool-call',
+      )
+      const fromField = Array.isArray(m.tool_calls) ? m.tool_calls : []
+
+      if (fromContent.length > 0 || fromField.length > 0) {
         open = []
-        const normalised = calls.map((c, k) => {
-          const id = String(c.id ?? '').trim() || `call_${i}_${k}`
-          const name = String(c.function?.name ?? '')
+        const normalised: Array<Record<string, unknown>> = []
+
+        for (const [k, b] of fromContent.entries()) {
+          const id = String(b.id ?? '').trim() || `call_${i}_${k}`
+          const name = String(b.name ?? '')
           if (name) names.set(id, name)
           open.push(id)
+          // arguments 在 DSH 里可能已经是对象，也可能是字符串
+          const args =
+            typeof b.arguments === 'string'
+              ? b.arguments
+              : JSON.stringify(b.arguments ?? {})
+          normalised.push({ id, type: 'function', function: { name, arguments: args } })
+        }
+
+        for (const [k, c] of fromField.entries()) {
+          const id = String(c.id ?? '').trim() || `call_${i}_f${k}`
+          const name = String(c.function?.name ?? '')
+          if (name) names.set(id, name)
+          // 同上：两者相同时别重复登记
+          if (!open.includes(id)) open.push(id)
           const args =
             typeof c.function?.arguments === 'string'
               ? c.function.arguments
               : JSON.stringify(c.function?.arguments ?? {})
-          return { id, type: 'function', function: { name, arguments: args } }
-        })
+          normalised.push({ id, type: 'function', function: { name, arguments: args } })
+        }
+
         const said = textOf(m.content)
         const turn: Record<string, unknown> = { role: 'assistant', tool_calls: normalised }
         if (said) turn.content = said
@@ -307,8 +379,15 @@ function modelConfig(m: ModelEntry, thinking: boolean): Record<string, unknown> 
 /** 小额度请求不思考：标题、分类这类调用不该把预算烧在推理上。 */
 const SMALL_BUDGET = 1024
 
-/** 思考档位的强度序。 */
-const EFFORT_RANK = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']
+/**
+ * 思考档位的强度序。
+ *
+ * `off` 是 DSH/pi-ai 表示「关闭思考」的取值（见 dsh-llm-pi-ai 的
+ * `thinkingLevelMap`：`{ off: null }`），它不在强度阶梯里，要单独认。
+ * 早期版本只认 none，用户选 off 会被当成无效值忽略、思考关不掉。
+ */
+const EFFORT_OFF = new Set(['off', 'none', 'disabled', 'false'])
+const EFFORT_RANK = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']
 
 /**
  * 把一个请求的档位夹到模型真有的档位里（照 magpie 的 `fitEffort`）。
@@ -350,7 +429,9 @@ function decideThinking(
 ): { thinking: boolean; effort: string } {
   const levels = model.efforts ?? []
   let want = String(asked ?? '').toLowerCase()
-  if (!EFFORT_RANK.includes(want)) want = ''
+  // `off` 归一成 `none`，两种写法都表示关闭
+  if (EFFORT_OFF.has(want)) want = 'none'
+  if (want !== 'none' && !EFFORT_RANK.includes(want)) want = ''
   if (want === '' && budget > 0 && budget <= SMALL_BUDGET) want = 'none'
 
   if (model.isReasoning !== true) return { thinking: false, effort: '' }
@@ -415,10 +496,20 @@ export function buildBody(
   resolved?: ReadonlyMap<string, ResolvedImage>,
   imageFailure?: { failed: number; reason?: string },
 ): Record<string, unknown> {
+  // 系统提示有两个来源，**两个都要读**（照 dsh-magpie-connect/messages.ts:390）：
+  //
+  //   1. `options.system` —— DSH 契约里真正传系统提示的字段
+  //   2. messages 里 role === 'system' / 'developer' 的消息
+  //
+  // 这里曾经只读第 2 种，结果 DSH 的全部系统提示都没发给上游：
+  // 实测传 `system: '你叫小白'` 过去，模型照样自称「我是 QwenWork（qw）」。
+  // 宿主给的 system 是 string，规范在先，消息体里的往后排。
+  const declared = typeof req.system === 'string' && req.system.trim() !== '' ? req.system : ''
   const systems = req.messages
     .filter(m => m.role === 'system' || m.role === 'developer')
     .map(m => textOf(m.content))
     .filter(Boolean)
+  if (declared !== '') systems.unshift(declared)
   const base = QWENWORK_SYSTEM_PROMPT
   const systemText = systems.length ? `${base}\n\n${systems.join('\n\n')}` : base
 
@@ -438,13 +529,16 @@ export function buildBody(
   //
   // 教训：抄 DSH 插件（dsh-magpie-connect），别抄协议网关（magpie）。
   // 两个项目同源但输入形状不同。
-  const tools = (req.tool_choice !== 'none' ? (req.tools ?? []) : [])
+  const tools = ((req.tool_choice ?? req.toolChoice) !== 'none' ? (req.tools ?? []) : [])
     .map(t => normaliseTool(t))
     .filter((t): t is NormalisedTool => t !== undefined)
 
-  const budget = req.max_completion_tokens ?? req.max_tokens ?? 0
-  const maxTokens = req.max_completion_tokens ?? req.max_tokens ?? 32000
-  const { thinking, effort } = decideThinking(req.reasoning_effort, model, budget)
+  // 字段名两种都认：DSH 契约是驼峰（maxTokens / reasoningEffort），
+  // OpenAI 风格是下划线（max_tokens / reasoning_effort）。
+  // 只认一种就会让宿主传的值被静默忽略。
+  const budget = req.maxTokens ?? req.max_completion_tokens ?? req.max_tokens ?? 0
+  const maxTokens = req.maxTokens ?? req.max_completion_tokens ?? req.max_tokens ?? 32000
+  const { thinking, effort } = decideThinking(req.reasoningEffort ?? req.reasoning_effort, model, budget)
 
   const parameters: Record<string, unknown> = {
     enable_thinking: thinking,
@@ -494,7 +588,7 @@ export function buildBody(
     }))
   }
 
-  if (req.tool_choice === 'required' && tools.length) {
+  if ((req.tool_choice ?? req.toolChoice) === 'required' && tools.length) {
     const s = body.system as Array<{ type: string; text: string }>
     s[0]!.text += '\nYou must call an available function in this response.'
     const first = (body.messages as Array<{ role: string; content: unknown }>)[0]!

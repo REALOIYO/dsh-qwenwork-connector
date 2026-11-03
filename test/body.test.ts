@@ -318,3 +318,148 @@ test('没有名字的工具被丢弃，但不会连累其他工具', () => {
   assert.equal(tools.length, 1, '只留下有名有姓的')
   assert.equal(tools[0]!.function.name, 'good')
 })
+
+test('回归：options.system 字段必须并进系统提示（DSH 真正传的是它）', () => {
+  // 曾经只读 messages 里的 system 角色消息，DSH 的 options.system 被
+  // 整个忽略 —— 实测传「你叫小白」过去，模型照样自称 QwenWork。
+  const body = buildBody(
+    {
+      system: '你的名字叫小白',
+      messages: [{ role: 'user', content: '你是谁' }],
+      maxTokens: 100,
+    },
+    model, 's', 'r', aTask(),
+  )
+  const sys = JSON.stringify(body.system) + JSON.stringify(body.messages)
+  assert.ok(sys.includes('你的名字叫小白'), '宿主给的 system 必须出现在提示里')
+})
+
+test('回归：system 与消息体 system 同时存在时都要保留', () => {
+  const body = buildBody(
+    {
+      system: '来自字段',
+      messages: [
+        { role: 'system', content: '来自消息' },
+        { role: 'user', content: '嗨' },
+      ],
+      maxTokens: 100,
+    },
+    model, 's', 'r', aTask(),
+  )
+  const sys = JSON.stringify(body.system)
+  assert.ok(sys.includes('来自字段'), '字段来源要在')
+  assert.ok(sys.includes('来自消息'), '消息来源也要在')
+  // 字段来源排在前
+  assert.ok(sys.indexOf('来自字段') < sys.indexOf('来自消息'), '宿主字段应在前')
+})
+
+test('回归：驼峰 maxTokens 生效（此前只认 max_tokens，上限永远默认值）', () => {
+  const withCamel = buildBody(
+    { messages: [{ role: 'user', content: 'x' }], maxTokens: 1234 },
+    model, 's', 'r', aTask(),
+  )
+  const withSnake = buildBody(
+    { messages: [{ role: 'user', content: 'x' }], max_tokens: 1234 },
+    model, 's', 'r', aTask(),
+  )
+  assert.equal((withCamel.parameters as Record<string, unknown>).max_tokens, 1234, '驼峰要认')
+  assert.equal((withSnake.parameters as Record<string, unknown>).max_tokens, 1234, '下划线也要认')
+})
+
+test('回归：驼峰 reasoningEffort 生效', () => {
+  // 模型没有档位阶梯时只发 enable_thinking；关掉思考要能让它变 false
+  const off = buildBody(
+    { messages: [{ role: 'user', content: 'x' }], maxTokens: 8000, reasoningEffort: 'off' },
+    model, 's', 'r', aTask(),
+  )
+  const on = buildBody(
+    { messages: [{ role: 'user', content: 'x' }], maxTokens: 8000 },
+    model, 's', 'r', aTask(),
+  )
+  assert.equal((off.parameters as Record<string, unknown>).enable_thinking, false, 'off 应关思考')
+  assert.equal((on.parameters as Record<string, unknown>).enable_thinking, true, '默认应开思考')
+})
+
+test('回归：toolChoice 驼峰也认', () => {
+  const body = buildBody(
+    {
+      messages: [{ role: 'user', content: 'x' }],
+      maxTokens: 100,
+      toolChoice: 'none',
+      tools: [{ name: 'foo', description: 'd', parameters: { type: 'object', properties: {} } }],
+    },
+    model, 's', 'r', aTask(),
+  )
+  assert.equal(body.tools, undefined, 'toolChoice=none 时不该带工具')
+})
+
+// ── DSH 真实形状（这是宿主实际传的，OpenAI 形状只是兼容） ──────────────
+
+test('回归：DSH 形状的工具调用（content 里的 tool-call 块）不能被丢掉', () => {
+  // 曾经只读 message.tool_calls，DSH 的 tool-call 块被当普通内容，
+  // 整轮 assistant 因为「没有文本」被 continue 丢弃。
+  const turns = qwenworkMessages([
+    { role: 'user', content: [{ type: 'text', text: '读一下 a.txt' }] },
+    {
+      role: 'assistant',
+      content: [
+        { type: 'reasoning', text: '要读文件' },
+        { type: 'tool-call', id: 'call_x', name: 'read_file', arguments: { path: 'a.txt' } },
+      ],
+    },
+    { role: 'tool', toolCallId: 'call_x', content: [{ type: 'text', text: '文件内容' }] },
+  ])
+
+  const assistant = turns.find(t => t.role === 'assistant')
+  assert.ok(assistant, 'assistant 轮不能消失')
+  const calls = assistant.tool_calls as Array<{ id: string; function: { name: string; arguments: string } }>
+  assert.equal(calls.length, 1, '要认出那个工具调用')
+  assert.equal(calls[0]!.id, 'call_x')
+  assert.equal(calls[0]!.function.name, 'read_file')
+  assert.equal(calls[0]!.function.arguments, '{"path":"a.txt"}', '对象参数要序列化成字符串')
+
+  const tool = turns.find(t => t.role === 'tool')
+  assert.ok(tool, '工具结果不能丢')
+  assert.equal(tool.tool_call_id, 'call_x', '驼峰 toolCallId 要能对上')
+  assert.equal(tool.content, '文件内容')
+})
+
+test('回归：DSH 形状的 toolCallId 用于配对，不能并回 user 轮', () => {
+  const turns = qwenworkMessages([
+    { role: 'user', content: [{ type: 'text', text: '跑两个命令' }] },
+    {
+      role: 'assistant',
+      content: [
+        { type: 'tool-call', id: 'c-a', name: 'ops_bash', arguments: { command: 'echo a' } },
+        { type: 'tool-call', id: 'c-b', name: 'ops_bash', arguments: { command: 'echo b' } },
+      ],
+    },
+    { role: 'tool', toolCallId: 'c-b', content: [{ type: 'text', text: '结果B' }] },
+    { role: 'tool', toolCallId: 'c-a', content: [{ type: 'text', text: '结果A' }] },
+  ])
+
+  const tools = turns.filter(t => t.role === 'tool')
+  assert.equal(tools.length, 2, '两个结果都要是 tool 轮')
+  // 按 id 配对，不是按顺序
+  const byId = new Map(tools.map(t => [t.tool_call_id as string, t.content]))
+  assert.equal(byId.get('c-a'), '结果A')
+  assert.equal(byId.get('c-b'), '结果B')
+})
+
+test('DSH 与 OpenAI 两种工具形状混用也能处理', () => {
+  const turns = qwenworkMessages([
+    { role: 'user', content: 'x' },
+    {
+      role: 'assistant',
+      content: [{ type: 'tool-call', id: 'ds-call', name: 'aa', arguments: '{}' }],
+      tool_calls: [{ id: 'oa-call', function: { name: 'bb', arguments: '{}' } }],
+    },
+    { role: 'tool', toolCallId: 'ds-call', content: 'A' },
+    { role: 'tool', tool_call_id: 'oa-call', content: 'B' },
+  ])
+  const assistant = turns.find(t => t.role === 'assistant')
+  const calls = assistant!.tool_calls as Array<{ id: string }>
+  assert.equal(calls.length, 2, '两种来源的调用都要保留')
+  const tools = turns.filter(t => t.role === 'tool')
+  assert.equal(tools.length, 2, '两种 id 写法都要能配对')
+})

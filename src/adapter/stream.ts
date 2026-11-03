@@ -277,6 +277,16 @@ export async function* toStreamChunks(
   body: AsyncIterable<Uint8Array>,
   model: string,
 ): AsyncGenerator<StreamChunk> {
+  // **所有块共用一个递增计数器**。
+  //
+  // DSH 的 BlockAssembler 按 index 认块身份（一个 index 只对应一个块），
+  // 且「已 block-end 关闭的 index 再收到 delta 会被忽略」。早先 text 与
+  // reasoning 各自从 -1 递增，模型「先想再答」时两者都拿到 index=0，
+  // 于是正文 delta 被灌进已经关闭的 reasoning 块、整段丢弃 —— 表现就是
+  // 「只有思维链、没有正文」。
+  //
+  // 别改回分开计数，也别给某一类块划固定号段。
+  let nextIndex = 0
   let textIndex = -1
   let reasoningIndex = -1
   let textOpen = false
@@ -287,8 +297,6 @@ export async function* toStreamChunks(
   /** 上游 tool call 累积：index -> {id, name, args} */
   const toolCalls = new Map<number, { id: string; name: string; args: string }>()
   const toolIndexes = new Map<number, number>()
-  /** 工具块的下标从 1000 起，和文本/思考块分开，避免撞号。 */
-  let nextToolIndex = 1000
   let sawToolCall = false
   let finishReason = ''
   let usage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number } | null = null
@@ -346,7 +354,7 @@ export async function* toStreamChunks(
 
     if (typeof delta.reasoning_content === 'string' && delta.reasoning_content !== '') {
       if (!reasoningOpen) {
-        reasoningIndex += 1
+        reasoningIndex = nextIndex++
         reasoningOpen = true
         yield { type: 'block-start', index: reasoningIndex, blockType: 'reasoning' }
       }
@@ -365,7 +373,7 @@ export async function* toStreamChunks(
         }
       }
       if (!textOpen) {
-        textIndex += 1
+        textIndex = nextIndex++
         textOpen = true
         yield { type: 'block-start', index: textIndex, blockType: 'text' }
       }
@@ -384,7 +392,7 @@ export async function* toStreamChunks(
       if (!slot) {
         slot = { id: id || `call_${upstreamIndex}_${toolCalls.size}`, name: '', args: '' }
         toolCalls.set(upstreamIndex, slot)
-        toolIndexes.set(upstreamIndex, nextToolIndex++)
+        toolIndexes.set(upstreamIndex, nextIndex++)
         sawToolCall = true
         yield { type: 'block-start', index: toolIndexes.get(upstreamIndex)!, blockType: 'tool-call' }
       }
@@ -429,6 +437,29 @@ export async function* toStreamChunks(
       block: { type: 'text', text: textBuffer.get(textIndex) ?? '' },
     }
   }
+  // 无名工具调用要拦掉（照 magpie index.mjs:2181-2196）：
+  // 模型发起了调用却始终没给 name，客户端会把一个没有名字的工具存进历史，
+  // 别的 provider 拿到直接拒整轮。有正文就丢掉这个坏调用，没正文就报错。
+  const named = [...toolCalls.entries()].filter(([, slot]) => slot.name.trim() !== '')
+  const droppedCalls = toolCalls.size - named.length
+  if (droppedCalls > 0) {
+    const said = [...textBuffer.values()].join('') + [...reasoningBuffer.values()].join('')
+    if (said.trim() === '') {
+      throw UpstreamError.from(
+        502,
+        JSON.stringify({ code: 502, message: `${model}: 上游返回了没有名字的工具调用` }),
+      )
+    }
+    // 有正文：静默丢掉坏调用，别让它污染历史
+    for (const [upstreamIndex] of toolCalls) {
+      if ((toolCalls.get(upstreamIndex)?.name ?? '').trim() === '') {
+        toolCalls.delete(upstreamIndex)
+        toolIndexes.delete(upstreamIndex)
+      }
+    }
+    sawToolCall = toolCalls.size > 0
+  }
+
   for (const [upstreamIndex, slot] of toolCalls) {
     yield {
       type: 'block-end',
