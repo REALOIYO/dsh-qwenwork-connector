@@ -10,7 +10,7 @@
 import { useSyncExternalStore } from 'react'
 
 /** locale namespace，和插件 id 区分开（避免与其他插件撞）。 */
-export const NS = 'qwenwork-connect'
+export const NS = 'dsh-qwenwork-connector'
 
 type Dict = Record<string, string>
 

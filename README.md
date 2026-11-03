@@ -26,17 +26,25 @@
 
 ## 装
 
+**从 GitHub 直接装**（`lib/` 已随仓库提供，不用自己编译）：
+
+```sh
+git clone https://github.com/REALOIYO/dsh-qwenwork-connector.git
+dsh plugin --profile desktop add "file:$(pwd)/dsh-qwenwork-connector"
+```
+
+或者在设置里的**插件**页面点「安装」，选本地目录也行。
+
+**从 npm 装**（发布后）：
+
 ```sh
 dsh plugin --profile desktop add dsh-qwenwork-connector
 ```
 
-还没发布到 npm 的话，直接指到本地目录：
-
-```sh
-dsh plugin --profile desktop add "file:/path/to/dsh-qwenwork-connector"
-```
-
 装完重启 DSH。模型选择器里会多出一个「千问办公」分组。
+
+> 想自己改代码的话：改完 `src/` 跑 `npm run build` 重新生成 `lib/`，
+> 然后重新装一次（DSH 是把插件复制进 profile 的，不是软链）。
 
 ---
 
