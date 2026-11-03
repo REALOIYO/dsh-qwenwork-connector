@@ -143,6 +143,37 @@ dsh plugin --profile desktop add "file:/path/to/dsh-qwenwork-connector"
 
 ---
 
+## 给想改代码的人：两个坑
+
+**一、DSH 传下来的工具是扁平结构**
+
+不是 OpenAI 那种 `{ type:'function', function:{...} }` 包装，而是：
+
+```js
+{ name: 'ops_bash', description: '...', parameters: { ... } }
+```
+
+早期版本只认包装格式，结果宿主给的 23 个工具全被静默丢弃。
+模型看不到任何工具，想调用却无从调起，只能吐一段思考就结束——
+现象就是「几秒钟就截断、只有思维链没有正文」。
+
+`normaliseTool()` 现在两种都认，改这块的话别再把类型收紧回去。
+
+**二、别用假形状测真实链路**
+
+`scripts/verify-real.mjs` 里曾经自己编了个 OpenAI 包装格式去测工具调用，
+脚本显示通过，真实链路却挂。测试和真实输入的形状必须一致，
+否则测了个寂寞。
+
+排查这类问题可以用：
+
+```sh
+node scripts/dump-stream.mjs              # 逐帧打印上游 SSE
+node scripts/repro-reasoning-only.mjs     # 分四种条件复现「只有思维链」
+```
+
+---
+
 ## 协议
 
 MIT，随便用。详见 [LICENSE](LICENSE)。
