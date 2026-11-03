@@ -22,6 +22,7 @@ import { AccountStore, GATEWAY, type StoredAccount } from './auth.ts'
 import { buildBody, type ChatRequest } from './body.ts'
 import { FALLBACK_MODELS, parseModelListing, type ModelEntry } from './catalog.ts'
 import { chatHeaders, clientHeaders, cosyHeaders } from './cosy.ts'
+import { markTaskAnswered, sessionOf, taskOf } from './session.ts'
 import { collectImageRefs, resolveImages, type AttachmentStore, type ImageAttachmentRef, type ResolvedImage } from './images.ts'
 import type { PrefsStore } from './prefs.ts'
 import { encodeBody } from './codec.ts'
@@ -328,9 +329,12 @@ export class QwenWorkAdapter {
 
   /** 用指定账号跑一次。 */
   async *#streamOnce(account: StoredAccount, entry: ModelEntry, options: GenerateOptions): AsyncGenerator<StreamChunk> {
-    const sessionId = options.sessionId ?? `qwenwork_${account.uid}`
+    // 会话 id 必须是「同一对话稳定、不同对话不同」，不能拿账号 uid 顶替——
+    // 那样所有对话会撞成一个会话，服务端缓存全串
+    const sessionId = sessionOf(options.sessionId ?? '', options)
     const requestId = randomUUID()
-    const taskId = requestId
+    // 一次用户提问 = 一个任务；工具循环的各轮复用它
+    const task = taskOf(sessionId, options)
 
     // ── 图片：DSH 传的是附件引用，必须先读成 data URL，否则会被静默丢弃
     const refs: ImageAttachmentRef[] = []
@@ -367,7 +371,7 @@ export class QwenWorkAdapter {
         entry,
         sessionId,
         requestId,
-        taskId,
+        task,
         this.#prefs?.windowFor(entry.key) ?? 0,
         degraded ? undefined : resolved,
         read.failed > 0
@@ -376,6 +380,8 @@ export class QwenWorkAdapter {
       )
       try {
         yield* this.#post(account, entry, body, options.signal)
+        // 这一轮被回答过了，后续轮次发 processing
+        markTaskAnswered(task)
         return
       } catch (error) {
         // 只在「带图 + 上游笼统拒绝 + 还没吐过内容」时降级一次

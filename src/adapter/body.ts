@@ -21,6 +21,7 @@ import {
   type ResolvedImage,
 } from './images.ts'
 import type { ModelEntry } from './catalog.ts'
+import { markTaskAnswered, taskOf, type Task } from './session.ts'
 
 export type { ModelEntry }
 
@@ -401,7 +402,7 @@ export function buildBody(
   model: ModelEntry,
   sessionId: string,
   requestId: string,
-  taskId: string,
+  task: Task,
   fixedWindow = 0,
   resolved?: ReadonlyMap<string, ResolvedImage>,
   imageFailure?: { failed: number; reason?: string },
@@ -436,7 +437,8 @@ export function buildBody(
   const sys = { type: 'text', text: systemText }
   const body: Record<string, unknown> = {
     request_id: requestId,
-    request_set_id: taskId,
+    // 同一任务的所有调用共用 request_set_id 与 begin_at
+    request_set_id: task.id,
     chat_record_id: requestId,
     session_id: sessionId,
     parameters,
@@ -444,10 +446,11 @@ export function buildBody(
       product: 'qoder_work',
       version: '1.1.59',
       type: 'agent',
-      id: taskId,
-      name: '',
-      begin_at: Date.now(),
-      stage: 'start',
+      id: task.id,
+      name: task.name,
+      begin_at: task.begin,
+      // 任务被回答过一轮后就是 processing
+      stage: task.answered ? 'processing' : 'start',
     },
     agent_id: 'agent_common',
     task_id: 'common',
@@ -491,10 +494,80 @@ export function buildBody(
   return body
 }
 
-/** 服务端对 schema 的 oneOf 挑剔：没有 type 的 oneOf 要走 `object`。 */
+/**
+ * 服务端对 schema 挑剔：**整棵** schema 里凡是「没有 type、但 oneOf 的
+ * 每个分支都是 object」的节点，都要补上 `type: 'object'`。
+ *
+ * 只补顶层的做法不够——工具参数经常是嵌套的，漏掉的深层节点一样会被拒。
+ * 照 magpie 的 `typedUnions`：递归走完整棵树，能解析 `$ref`，深度有上限
+ * 防环。
+ */
+
+/** 值是单个子 schema 的键。 */
+const SUB_ONE = [
+  'items',
+  'additionalItems',
+  'unevaluatedItems',
+  'contains',
+  'not',
+  'if',
+  'then',
+  'else',
+  'propertyNames',
+  'additionalProperties',
+  'unevaluatedProperties',
+]
+/** 值是子 schema 数组的键。 */
+const SUB_LIST = ['anyOf', 'oneOf', 'allOf', 'prefixItems']
+/** 值是「名字 → 子 schema」映射的键。 */
+const SUB_MAP = ['properties', 'patternProperties', '$defs', 'definitions', 'dependentSchemas']
+
 function normaliseSchema(schema: unknown): unknown {
   if (!schema || typeof schema !== 'object') return schema
-  const o = schema as Record<string, unknown>
-  if (Array.isArray(o.oneOf) && !o.type) return { ...o, type: 'object' }
-  return o
+  const root = structuredClone(schema) as Record<string, unknown>
+  const isObj = (v: unknown): v is Record<string, unknown> =>
+    typeof v === 'object' && v !== null && !Array.isArray(v)
+
+  /** 按 JSON Pointer 找 `$ref` 指向的节点。 */
+  const target = (ref: string): Record<string, unknown> | undefined => {
+    if (!ref.startsWith('#/')) return undefined
+    let at: unknown = root
+    for (const k of ref.slice(2).split('/')) {
+      if (!isObj(at)) return undefined
+      at = at[k.replaceAll('~1', '/').replaceAll('~0', '~')]
+    }
+    return isObj(at) ? at : undefined
+  }
+
+  /** 判断一个分支最终是不是 object（会跟 `$ref`，带环检测）。 */
+  const isObject = (branch: unknown, seen: string[] = []): boolean => {
+    if (!isObj(branch)) return false
+    if ('type' in branch) return branch.type === 'object'
+    if (typeof branch.$ref !== 'string' || seen.includes(branch.$ref) || seen.length > 16) return false
+    return isObject(target(branch.$ref), [...seen, branch.$ref])
+  }
+
+  const walk = (node: unknown, depth: number): void => {
+    if (!isObj(node) || depth > 64) return
+    if (
+      !('type' in node) &&
+      Array.isArray(node.oneOf) &&
+      node.oneOf.length > 0 &&
+      node.oneOf.every(b => isObject(b))
+    ) {
+      node.type = 'object'
+    }
+    for (const k of SUB_ONE) walk(node[k], depth + 1)
+    for (const k of SUB_LIST) {
+      const list = node[k]
+      if (Array.isArray(list)) for (const v of list) walk(v, depth + 1)
+    }
+    for (const k of SUB_MAP) {
+      const map = node[k]
+      if (isObj(map)) for (const v of Object.values(map)) walk(v, depth + 1)
+    }
+  }
+
+  walk(root, 0)
+  return root
 }

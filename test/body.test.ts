@@ -12,6 +12,10 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { buildBody, qwenworkMessages, textOf, QWENWORK_SYSTEM_PROMPT, type ModelEntry } from '../src/adapter/body.ts'
+import type { Task } from '../src/adapter/session.ts'
+
+/** 造一个测试用任务。 */
+const aTask = (id = 'task-1'): Task => ({ id, begin: 1700000000000, answered: false, name: 'test', used: Date.now() })
 
 const model: ModelEntry = {
   key: 'qwen3.8-max-preview',
@@ -32,7 +36,7 @@ test('基础请求：system 有两份，用户消息在', () => {
     model,
     'sess-1',
     'req-1',
-    'task-1',
+    aTask('task-1'),
   )
 
   // system 字段
@@ -59,7 +63,7 @@ test('基础请求：system 有两份，用户消息在', () => {
 test('模型 key 为 auto/default 要抛错', () => {
   const bad: ModelEntry = { key: 'auto', displayName: 'x' }
   assert.throws(
-    () => buildBody({ messages: [{ role: 'user', content: 'hi' }], max_tokens: 100 }, bad, 's', 'r', 't'),
+    () => buildBody({ messages: [{ role: 'user', content: 'hi' }], max_tokens: 100 }, bad, 's', 'r', aTask()),
     /模型 key 不可用/,
   )
 })
@@ -134,7 +138,7 @@ test('最后一条用户消息的末块打 prompt cache 标记', () => {
       max_tokens: 1000,
     },
     model,
-    's', 'r', 't',
+    's', 'r', aTask(),
   )
 
   const msgs = body.messages as Array<{ role: string; content: unknown }>
@@ -146,7 +150,7 @@ test('最后一条用户消息的末块打 prompt cache 标记', () => {
 test('小额度请求不思考（标题/分类这类调用）', () => {
   const body = buildBody(
     { messages: [{ role: 'user', content: '起个标题' }], max_tokens: 64 },
-    model, 's', 'r', 't',
+    model, 's', 'r', aTask(),
   )
   const params = body.parameters as Record<string, unknown>
   assert.equal(params.enable_thinking, false, '预算 ≤1024 不应思考')
@@ -155,7 +159,7 @@ test('小额度请求不思考（标题/分类这类调用）', () => {
 test('reasoning_effort=none 不思考', () => {
   const body = buildBody(
     { messages: [{ role: 'user', content: 'x' }], max_tokens: 32000, reasoning_effort: 'none' },
-    model, 's', 'r', 't',
+    model, 's', 'r', aTask(),
   )
   assert.equal((body.parameters as Record<string, unknown>).enable_thinking, false)
 })
@@ -164,13 +168,13 @@ test('非思考模型始终不思考', () => {
   const plain: ModelEntry = { key: 'flash', displayName: '标准', isReasoning: false }
   const body = buildBody(
     { messages: [{ role: 'user', content: 'x' }], max_tokens: 32000, reasoning_effort: 'high' },
-    plain, 's', 'r', 't',
+    plain, 's', 'r', aTask(),
   )
   assert.equal((body.parameters as Record<string, unknown>).enable_thinking, false)
   assert.equal((body.model_config as Record<string, unknown>).is_reasoning, false)
 })
 
-test('工具声明被带上，无 type 的 oneOf 补 object', () => {
+test('工具声明被带上；every 分支都是 object 的 oneOf 补 type', () => {
   const body = buildBody(
     {
       messages: [{ role: 'user', content: 'x' }],
@@ -180,11 +184,11 @@ test('工具声明被带上，无 type 的 oneOf 补 object', () => {
         function: {
           name: 'do_it',
           description: '做事',
-          parameters: { oneOf: [{ type: 'string' }, { type: 'number' }] },
+          parameters: { oneOf: [{ type: 'object', properties: { a: { type: 'string' } } }, { type: 'object', properties: { b: { type: 'number' } } }] },
         },
       }],
     },
-    model, 's', 'r', 't',
+    model, 's', 'r', aTask(),
   )
 
   const tools = body.tools as Array<{ function: { name: string; parameters: Record<string, unknown> } }>
@@ -202,7 +206,7 @@ test('tool_choice=none 时不带工具', () => {
       tool_choice: 'none',
       tools: [{ type: 'function', function: { name: 'do_it' } }],
     },
-    model, 's', 'r', 't',
+    model, 's', 'r', aTask(),
   )
   assert.equal(body.tools, undefined)
 })
@@ -212,4 +216,46 @@ test('textOf 处理字符串与块数组', () => {
   assert.equal(textOf([{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }]), 'ab')
   assert.equal(textOf([{ type: 'image_url', image_url: { url: 'x' } }]), '')
   assert.equal(textOf(null), '')
+})
+
+test('嵌套在 properties 里的 oneOf 也要补 type（只补顶层不够）', () => {
+  const body = buildBody(
+    {
+      messages: [{ role: 'user', content: 'x' }],
+      max_tokens: 1000,
+      tools: [{
+        type: 'function',
+        function: {
+          name: 'nested',
+          parameters: {
+            type: 'object',
+            properties: {
+              // 深层节点：没有 type，但两个分支都是 object
+              payload: { oneOf: [{ type: 'object', properties: { a: { type: 'string' } } }, { type: 'object' }] },
+            },
+          },
+        },
+      }],
+    },
+    model, 's', 'r', aTask(),
+  )
+  const tools = body.tools as Array<{ function: { parameters: Record<string, any> } }>
+  const payload = tools[0]!.function.parameters.properties.payload
+  assert.equal(payload.type, 'object', '深层 oneOf 也要补 type')
+})
+
+test('分支不是 object 的 oneOf 不动（string|number 保持原样）', () => {
+  const body = buildBody(
+    {
+      messages: [{ role: 'user', content: 'x' }],
+      max_tokens: 1000,
+      tools: [{
+        type: 'function',
+        function: { name: 'mix', parameters: { oneOf: [{ type: 'string' }, { type: 'number' }] } },
+      }],
+    },
+    model, 's', 'r', aTask(),
+  )
+  const tools = body.tools as Array<{ function: { parameters: Record<string, any> } }>
+  assert.equal(tools[0]!.function.parameters.type, undefined, '混合类型不该被强改成 object')
 })
