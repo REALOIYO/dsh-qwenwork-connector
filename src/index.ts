@@ -277,7 +277,35 @@ function installRoutes(
             plan: a.plan,
             balance: a.balance,
             expires: a.expires,
+            quota: a.quota,
+            renewsAt: a.renewsAt,
+            period: a.period,
+            syncedAt: a.syncedAt,
           })),
+        })
+      })
+
+      // POST /api/qwenwork/account/sync — 向上游重拉额度与套餐
+      // 设置页「刷新」按钮打这里；部分账号失败也返回 200，
+      // 把原因放进 errors，界面可以逐账号显示。
+      registerRoute(`${API_PREFIX}/account/sync`, ['POST'], async () => {
+        await store.load()
+        const { accounts, errors } = await store.sync(cfg.gateway)
+        logger.info(`dsh-qwenwork-connect: 同步账号 ${accounts.length} 个，失败 ${errors.length} 个`)
+        return json(200, {
+          ok: errors.length === 0,
+          accounts: accounts.map(a => ({
+            uid: a.uid,
+            label: a.label ?? a.uid,
+            plan: a.plan,
+            balance: a.balance,
+            expires: a.expires,
+            quota: a.quota,
+            renewsAt: a.renewsAt,
+            period: a.period,
+            syncedAt: a.syncedAt,
+          })),
+          errors,
         })
       })
 

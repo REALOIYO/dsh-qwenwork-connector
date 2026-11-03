@@ -206,3 +206,77 @@ test('AccountStore 读写与去重', async () => {
   assert.equal(store.list().length, 1)
   assert.equal(store.find('u-a'), undefined)
 })
+
+test('AccountStore.sync 真的打到上游并更新额度（而不是读本地快照）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'qw-sync-'))
+  let remaining = 895.3636
+  const gw = await fakeGateway({
+    '/api/v1/adapter/user/account-context': () => ({
+      status: 200,
+      json: {
+        code: 'ok',
+        data: {
+          user: { id: 'u-1', name: '小明', email: 'a@b.c' },
+          plan: { name: 'basic', period: 'monthly', next_due_date: '2026-12-03T11:46:42Z' },
+          quota: { total: null, used: null, remaining, exceeded: false },
+        },
+      },
+    }),
+  })
+
+  try {
+    const store = new AccountStore(dir)
+    // 登录时的旧快照：900；真实已降到 895.3636
+    await store.upsert({
+      uid: 'u-1', access: 'tok', machineId: 'm1', label: 'a@b.c',
+      plan: 'basic', balance: '900 credits',
+    })
+
+    const first = await store.sync(gw.base)
+    assert.deepEqual(first.errors, [], '不该有错误')
+    const a = first.accounts[0]
+    assert.ok(a !== undefined, '应该有一个账号')
+    assert.equal(a.balance, '895.36 credits', '额度应来自上游')
+    assert.equal(a.quota?.remaining, 895.3636, '结构化额度也要带回来')
+    assert.equal(a.period, 'monthly')
+    assert.equal(a.renewsAt, Date.parse('2026-12-03T11:46:42Z'), '续费时间要解析出来')
+    assert.ok(typeof a.syncedAt === 'number' && a.syncedAt > 0, '要记录同步时刻')
+
+    // 再降一次，确认是可重复同步而非一次性
+    remaining = 800
+    const second = await store.sync(gw.base)
+    assert.equal(second.accounts[0]?.balance, '800 credits')
+
+    // 落盘了才叫真同步（重启后仍是新值）
+    const again = new AccountStore(dir)
+    await again.load()
+    assert.equal(again.find('u-1')?.balance, '800 credits')
+  } finally {
+    await gw.close()
+  }
+})
+
+test('sync 遇到 401 时保留原数据并报错，不把账号清空', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'qw-sync-401-'))
+  const gw = await fakeGateway({
+    '/api/v1/adapter/user/account-context': () => ({
+      status: 401,
+      json: { errorCode: 'INVALID_TOKEN' },
+    }),
+  })
+
+  try {
+    const store = new AccountStore(dir)
+    await store.upsert({
+      uid: 'u-1', access: 'bad', machineId: 'm1', label: 'a@b.c', balance: '900 credits',
+    })
+
+    const r = await store.sync(gw.base)
+    assert.equal(r.errors.length, 1, '要有一个账号的错误')
+    assert.match(r.errors[0] ?? '', /401|失效/, '错误要说明是 token 问题')
+    assert.equal(r.accounts.length, 1, '账号不能消失')
+    assert.equal(r.accounts[0]?.balance, '900 credits', '旧额度保留，不能被清成空')
+  } finally {
+    await gw.close()
+  }
+})

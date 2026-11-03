@@ -37,6 +37,10 @@ export const ZH: Dict = {
   expiresAt: '有效期至',
   plan: '套餐',
   balance: '余额',
+  renewsAt: '下次续费',
+  syncedAt: '同步于',
+  refreshed: '已同步',
+  exceeded: '额度已用尽',
 
   modelSection: '可用模型',
   modelHint: '这些是千问办公当前提供的模型，登录后即可在模型选择器里选到。倍率是相对标准价的倍数，越低越便宜。',
@@ -76,6 +80,10 @@ export const EN: Dict = {
   expiresAt: 'Expires',
   plan: 'Plan',
   balance: 'Balance',
+  renewsAt: 'Renews',
+  syncedAt: 'Synced',
+  refreshed: 'Synced at',
+  exceeded: 'Quota exhausted',
 
   modelSection: 'Available models',
   modelHint: 'Models QwenWork offers right now. The multiplier is relative to standard pricing — lower is cheaper.',

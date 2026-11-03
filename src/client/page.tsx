@@ -40,7 +40,18 @@ interface StatusPayload {
     plan?: string
     balance?: string
     expires?: number
+    quota?: { total?: number; used?: number; remaining?: number; exceeded?: boolean }
+    renewsAt?: number
+    period?: string
+    syncedAt?: number
   }>
+}
+
+/** 账号同步（刷新额度）的响应。 */
+interface SyncPayload {
+  ok: boolean
+  accounts: StatusPayload['accounts']
+  errors: string[]
 }
 
 /** 后端返回的登录响应。 */
@@ -196,6 +207,8 @@ export function QwenWorkSettings(): React.ReactElement {
   const [loginUrl, setLoginUrl] = useState('')
   const [waiting, setWaiting] = useState(false)
   const [copied, setCopied] = useState(false)
+  /** 上次同步成功的时刻（仅本次会话，用来给用户一点确认感）。 */
+  const [syncedAt, setSyncedAt] = useState('')
   /** 登录开始时的账号数：用来判断有没有新账号进来。 */
   const baseline = useRef(0)
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -307,6 +320,30 @@ export function QwenWorkSettings(): React.ReactElement {
     [load],
   )
 
+  /**
+   * 刷新账号现状（额度/套餐/续期）。
+   *
+   * 必须打 sync 路由——只 load() 读的是本地快照，
+   * 那个数字从登录那刻起就不会再变了。
+   */
+  const syncAccounts = useCallback(async () => {
+    setBusy(true)
+    setSyncedAt('')
+    try {
+      const data = await request<SyncPayload>('/api/qwenwork/account/sync', 'POST', {})
+      setStatus(prev => (prev === null ? prev : { ...prev, accounts: data.accounts }))
+      if (data.errors.length > 0) setError(data.errors.join('\n'))
+      else {
+        setError('')
+        setSyncedAt(new Date().toLocaleTimeString())
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }, [])
+
   const accounts = status?.accounts ?? []
   const models = status?.models ?? []
 
@@ -365,24 +402,42 @@ export function QwenWorkSettings(): React.ReactElement {
                       {text('balance')}: {a.balance}
                     </span>
                   )}
+                  {a.quota?.exceeded === true && (
+                    <span style={{ ...css.chip, color: 'var(--dsw-alias-label-error)' }}>{text('exceeded')}</span>
+                  )}
                 </div>
                 <div style={css.row}>
                   <span style={css.hint}>
                     {a.expires ? `${text('expiresAt')} ${new Date(a.expires).toLocaleString()}` : ''}
                   </span>
+                  {a.renewsAt !== undefined && (
+                    <span style={css.hint}>
+                      {text('renewsAt')} {new Date(a.renewsAt).toLocaleDateString()}
+                    </span>
+                  )}
                   <Btn onClick={() => void removeAccount(a.uid)} disabled={busy}>
                     {text('logout')}
                   </Btn>
                 </div>
+                {a.syncedAt !== undefined && (
+                  <span style={css.mono}>
+                    {text('syncedAt')} {new Date(a.syncedAt).toLocaleString()}
+                  </span>
+                )}
               </div>
             ))}
             <div style={css.row}>
               <Btn onClick={startLogin} disabled={busy}>
                 {busy ? text('loggingIn') : text('login')}
               </Btn>
-              <Btn onClick={() => void load()} disabled={busy}>
+              <Btn onClick={() => void syncAccounts()} disabled={busy}>
                 {text('refresh')}
               </Btn>
+              {syncedAt !== '' && (
+                <span style={css.ok}>
+                  {text('refreshed')} {syncedAt}
+                </span>
+              )}
             </div>
           </>
         )}

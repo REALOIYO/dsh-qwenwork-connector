@@ -4,3 +4,4 @@ lib/
 *.tsbuildinfo
 .DS_Store
 node_modules/
+_probe-*.mjs

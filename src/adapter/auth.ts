@@ -43,6 +43,35 @@ export interface StoredAccount extends QwenWorkAccount {
   plan?: string
   /** 剩余额度文案，来自 account-context。 */
   balance?: string
+  /** 结构化配额：总额度可能为 null（套餐按次计费），所以都允许缺省。 */
+  quota?: AccountQuota
+  /** 套餐下次扣费/续期时间（毫秒）。 */
+  renewsAt?: number
+  /** 套餐周期，如 monthly。 */
+  period?: string
+  /** 上次成功同步账号信息的时间（毫秒），0/缺省表示从未同步过。 */
+  syncedAt?: number
+}
+
+/** account-context 里的 quota 段。 */
+export interface AccountQuota {
+  total?: number
+  used?: number
+  remaining?: number
+  exceeded?: boolean
+}
+
+/** 从上游读回来的一份账号现状。 */
+export interface AccountContext {
+  uid: string
+  name: string
+  email: string
+  plan?: string
+  quota?: AccountQuota
+  renewsAt?: number
+  period?: string
+  /** 展示用余额文案，如 `895.36 credits`。 */
+  balance?: string
 }
 
 /** 落盘格式。 */
@@ -138,23 +167,22 @@ export function startDeviceSignIn(gateway = GATEWAY, pollInterval = DEFAULT_POLL
       let name = String(device.user_name ?? '')
       let plan: string | undefined
       let balance: string | undefined
+      let quota: AccountQuota | undefined
+      let renewsAt: number | undefined
+      let period: string | undefined
 
       // account-context 是拿 uid 与额度的权威来源；拿不到不算致命，
       // 但 uid 是签名必需的（Cosy-User），没有就没法聊天
       try {
-        const ui = await openapi(gateway, '/api/v1/adapter/user/account-context?include=user,plan,quota', { token })
-        if (ui.status >= 200 && ui.status < 300) {
-          const data = unwrap(ui.json)
-          const user = (data.user ?? data) as Record<string, unknown>
-          uid = String(user?.id ?? user?.user_id ?? user?.uid ?? uid ?? '').trim()
-          email = String(user?.email ?? '')
-          name = String(user?.name ?? name ?? '')
-          const p = data.plan as Record<string, unknown> | undefined
-          if (typeof p?.name === 'string') plan = p.name
-          const q = data.quota as Record<string, unknown> | undefined
-          const remaining = Number(q?.remaining)
-          if (Number.isFinite(remaining)) balance = `${remaining} credits`
-        }
+        const ctx = await readAccountContext(gateway, token)
+        uid = ctx.uid || uid
+        email = ctx.email
+        name = ctx.name || name
+        plan = ctx.plan
+        balance = ctx.balance
+        quota = ctx.quota
+        renewsAt = ctx.renewsAt
+        period = ctx.period
       } catch {
         // 读不到额度不影响登录本身
       }
@@ -173,10 +201,82 @@ export function startDeviceSignIn(gateway = GATEWAY, pollInterval = DEFAULT_POLL
         machineId,
         ...(plan !== undefined ? { plan } : {}),
         ...(balance !== undefined ? { balance } : {}),
+        ...(quota !== undefined ? { quota } : {}),
+        ...(renewsAt !== undefined ? { renewsAt } : {}),
+        ...(period !== undefined ? { period } : {}),
+        syncedAt: Date.now(),
         label: email || name || uid,
       }
     },
   }
+}
+
+/**
+ * 读一次 account-context，返回账号现状。
+ *
+ * 登录和「刷新额度」共用这一处，避免两套解析逻辑漂移。
+ * 上游返回的 `quota.total` 对按次套餐常为 null，因此全部字段都按可选处理。
+ *
+ * @param gateway 网关地址
+ * @param token   Bearer token
+ */
+export async function readAccountContext(gateway: string, token: string): Promise<AccountContext> {
+  const r = await openapi(gateway, '/api/v1/adapter/user/account-context?include=user,plan,quota', { token })
+  if (r.status < 200 || r.status >= 300) {
+    // 401 是明确的「token 失效」，要让调用方知道得重新登录
+    if (r.status === 401) throw new Error('qwenwork: 登录已失效，请重新登录')
+    throw new Error(`qwenwork: 读取账号信息失败（HTTP ${r.status}）`)
+  }
+
+  const data = unwrap(r.json)
+  const user = (data.user ?? data) as Record<string, unknown>
+  const uid = String(user?.id ?? user?.user_id ?? user?.uid ?? '').trim()
+  const email = String(user?.email ?? '')
+  const name = String(user?.name ?? user?.username ?? '')
+
+  const p = data.plan as Record<string, unknown> | undefined
+  const plan = typeof p?.name === 'string' && p.name.trim() !== '' ? p.name : undefined
+  const period = typeof p?.period === 'string' && p.period.trim() !== '' ? p.period : undefined
+  const dueAt = Date.parse(String(p?.next_due_date ?? '').trim())
+  const renewsAt = Number.isNaN(dueAt) ? undefined : dueAt
+
+  const q = data.quota as Record<string, unknown> | undefined
+  const num = (v: unknown): number | undefined => {
+    if (v === null || v === undefined || v === '') return undefined
+    const n = Number(v)
+    return Number.isFinite(n) ? n : undefined
+  }
+  const quota: AccountQuota | undefined =
+    q === undefined || q === null
+      ? undefined
+      : {
+          ...(num(q.total) !== undefined ? { total: num(q.total) } : {}),
+          ...(num(q.used) !== undefined ? { used: num(q.used) } : {}),
+          ...(num(q.remaining) !== undefined ? { remaining: num(q.remaining) } : {}),
+          ...(typeof q.exceeded === 'boolean' ? { exceeded: q.exceeded } : {}),
+        }
+
+  return {
+    uid,
+    name,
+    email,
+    ...(plan !== undefined ? { plan } : {}),
+    ...(quota !== undefined ? { quota } : {}),
+    ...(renewsAt !== undefined ? { renewsAt } : {}),
+    ...(period !== undefined ? { period } : {}),
+    // 保留两位小数就够了，900 位小数没意义
+    ...(quota?.remaining !== undefined ? { balance: `${round2(quota.remaining)} credits` } : {}),
+  }
+}
+
+/**
+ * 额度数字转文案：整数不带小数位，其余保留两位。
+ *
+ * 上游返回的是浮点（实际见过 895.3636），全按两位展示；但 900 这种整数
+ * 写成 `900.00` 只是噪音。
+ */
+function round2(n: number): string {
+  return Number.isInteger(n) ? String(n) : (Math.round(n * 100) / 100).toFixed(2)
 }
 
 /** poll 返回的 token 结构（只取用到的字段）。 */
@@ -295,6 +395,43 @@ export class AccountStore {
     await this.load()
     this.#accounts = this.#accounts.filter(a => a.uid !== uid)
     await this.#flush()
+  }
+
+  /**
+   * 向上游重新拉一次账号现状（额度/套餐/续期），落盘并返回最新列表。
+   *
+   * 这是设置页「刷新」按钮的后端：登录时只读一次 account-context，
+   * 之后的额度变化必须主动同步，否则界面上的数字永远是登录那一刻的。
+   *
+   * 单个账号失败不影响其他账号，只把错误汇总返回，让界面能提示。
+   *
+   * @param gateway 网关地址
+   */
+  async sync(gateway: string): Promise<{ accounts: StoredAccount[]; errors: string[] }> {
+    await this.load()
+    const errors: string[] = []
+    let dirty = false
+
+    for (const account of this.#accounts) {
+      try {
+        const ctx = await readAccountContext(gateway, account.access)
+        // token 还在，但上游说 uid 变了属异常，保留原 uid 以免会话/缓存错乱
+        if (ctx.plan !== undefined) account.plan = ctx.plan
+        if (ctx.balance !== undefined) account.balance = ctx.balance
+        if (ctx.quota !== undefined) account.quota = ctx.quota
+        if (ctx.renewsAt !== undefined) account.renewsAt = ctx.renewsAt
+        if (ctx.period !== undefined) account.period = ctx.period
+        if (ctx.name !== '') account.name = ctx.name
+        if (ctx.email !== '') account.email = ctx.email
+        account.syncedAt = Date.now()
+        dirty = true
+      } catch (error) {
+        errors.push(`${account.label ?? account.uid}：${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+
+    if (dirty) await this.#flush()
+    return { accounts: this.list(), errors }
   }
 
   /** 原子写：先写临时文件再 rename，避免中断留下半个 JSON。 */
