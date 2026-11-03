@@ -167,8 +167,8 @@ export function failure(status: number, text: string): Failure {
   /**
    * 上游 429「All models failed」是**模型池暂时没有可用实例**，不是额度耗尽。
    *
-   * 这个必须放在额度判断之前：实测多轮循环第 4 轮就会撞上，账号明明还有
-   * 899 credits。误判成额度会导致插件直接放弃，表现就是「跑一会儿就停」。
+   * 这个必须放在额度判断之前：实测多轮循环第 4 轮就会撞上，而账号额度
+   * 明明还很充足。误判成额度会导致插件直接放弃，表现就是「跑一会儿就停」。
    * 归为可重试的服务端错误，让调用方等一会儿再来。
    */
   if (/all models failed/i.test(msg)) {
@@ -396,7 +396,12 @@ export async function* toStreamChunks(
         sawToolCall = true
         yield { type: 'block-start', index: toolIndexes.get(upstreamIndex)!, blockType: 'tool-call' }
       }
-      if (id && !slot.id.startsWith('call_')) slot.id = id
+      // 上游常常先用一帧给 name/空 id，后面几帧才补真实 id。
+      // 所以只要这一帧带了 id 就覆盖掉占位值——
+      // 曾经写成 `!slot.id.startsWith('call_')`，而占位 id 恰好就是
+      // `call_…` 前缀，条件永远为假，真实 id 一个也进不来。结果工具结果
+      // 回传时 id 对不上，多工具并行会把结果配错。
+      if (id) slot.id = id
       if (name) slot.name = name
       if (args) slot.args += args
       yield {

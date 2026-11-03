@@ -1,7 +1,10 @@
 node_modules/
-lib/
 *.log
 *.tsbuildinfo
 .DS_Store
-node_modules/
 _probe-*.mjs
+
+# lib/ **故意不忽略**：这个插件是直接从 GitHub 装的（file: / link:），
+# 不是 npm 发布流程。DSH 加载的是 lib/index.js，若不入库，
+# clone 之后装上去会因为缺文件直接起不来。
+# 对照 dsh-magpie-connect 的做法，它也是把 lib/ 提交进仓库的。

@@ -230,7 +230,15 @@ export function qwenworkMessages(
         continue
       }
       const answered = open.splice(at, 1)[0]!
-      out.push({ role: 'tool', tool_call_id: answered, content: text })
+      // 空输出要占位，别发空串（照 dsh-magpie-connect 的 '(no output)'）；
+      // 命令失败时把错误标出来，否则模型分不清「执行失败」和「成功但没输出」。
+      const body = text.trim() === '' ? '(no output)' : text
+      const failed = m.isError === true
+      out.push({
+        role: 'tool',
+        tool_call_id: answered,
+        content: failed ? `${body}\n\n[error] 该工具执行失败` : body,
+      })
       continue
     }
 
@@ -315,7 +323,13 @@ export function qwenworkMessages(
         continue
       }
       const answered = open.splice(at, 1)[0]!
-      out.push({ role: 'tool', tool_call_id: answered, content: text })
+      const body = text.trim() === '' ? '(no output)' : text
+      const failed = r.isError === true
+      out.push({
+        role: 'tool',
+        tool_call_id: answered,
+        content: failed ? `${body}\n\n[error] 该工具执行失败` : body,
+      })
     }
   }
 

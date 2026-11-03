@@ -17,6 +17,7 @@ import { join } from 'node:path'
 
 import { QwenWorkAdapter, MODELS } from '../src/adapter/qwenwork.ts'
 import { AccountStore, type StoredAccount } from '../src/adapter/auth.ts'
+import { PrefsStore } from '../src/adapter/prefs.ts'
 import { decodeBody } from '../src/adapter/codec.ts'
 
 /** 造一个已登录账号。 */
@@ -244,4 +245,29 @@ test('错误信息带上账号标签，便于定位是哪个号', async () => {
   } finally {
     await gw.close()
   }
+})
+
+test('回归：用户选的上下文档位要反映到 resolveModel 的 contextWindow', async () => {
+  // 曾经恒取上游最大值，用户选了 200K 而 DSH 仍按最大值算压缩阈值，
+  // 导致「剩余上下文」和压缩时机全是错的。
+  const dir = await mkdtemp(join(tmpdir(), 'qw-window-'))
+  const store = new AccountStore(dir)
+  const prefs = new PrefsStore(dir)
+  await prefs.load()
+
+  const adapter = new QwenWorkAdapter({ store, prefs })
+
+  const auto = adapter.resolveModel('qwenwork', 'flash')
+  const autoWindow = auto.context.contextWindow
+  assert.ok(autoWindow > 0, '自动时应回落到上游给的窗口')
+
+  // 选一个明显更小的档位
+  await adapter.setWindowPreference('flash', 200000)
+  const chosen = adapter.resolveModel('qwenwork', 'flash')
+  assert.equal(chosen.context.contextWindow, 200000, 'DSH 看到的窗口要跟着用户的选择走')
+
+  // 改回自动
+  await adapter.setWindowPreference('flash', 0)
+  const back = adapter.resolveModel('qwenwork', 'flash')
+  assert.equal(back.context.contextWindow, autoWindow, '选自动要回落到默认值')
 })

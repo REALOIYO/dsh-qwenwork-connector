@@ -194,13 +194,24 @@ export class QwenWorkAdapter {
           }
         : undefined
 
+    // 上下文窗口要反映**用户当前选的档位**，不能恒取上游最大值。
+    //
+    // 否则用户在设置里选了 200K，DSH 这边仍按 1M 算：压缩时机、剩余
+    // 上下文百分比全是假的，而实际请求只带 200K —— 两边对不上，
+    // 长对话会在不该压缩的时候压缩、该提示的时候不提示。
+    //
+    // 用户选「自动」(0) 时才回落到上游给的最大值。
+    const chosen = this.#prefs?.windowFor(model) ?? 0
+    const contextWindow =
+      chosen > 0 ? chosen : (entry?.maxInputTokens ?? entry?.defaultWindow ?? DEFAULT_CONTEXT_WINDOW)
+
     return {
       provider,
       id: model,
       name: entry?.displayName ?? model,
       inputModalities: entry?.isVision === true ? ['text', 'image'] : ['text'],
       context: {
-        contextWindow: entry?.maxInputTokens ?? entry?.defaultWindow ?? DEFAULT_CONTEXT_WINDOW,
+        contextWindow,
       },
       defaultMaxTokens: DEFAULT_MAX_TOKENS,
       ...(reasoning !== undefined ? { reasoning } : {}),

@@ -344,3 +344,40 @@ test('无名工具调用且无正文时，明确报错而不是静默结束', as
     return true
   })
 })
+
+test('回归：工具 id 迟到时不能丢掉真实 id', async () => {
+  // 上游常见顺序：第一帧给 name 不给 id，后面才补 id。
+  // 曾经判断条件是 `!slot.id.startsWith('call_')`，而占位 id 恰好就是
+  // `call_…` 前缀，条件永远为假 → 真实 id 一个也进不来 → 工具结果回传时
+  // id 对不上，多工具并行会把结果配错。
+  const frames = [
+    `data: ${JSON.stringify({ body: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { name: 'read_file', arguments: '' } }] } }] }) })}`,
+    `data: ${JSON.stringify({ body: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'REAL_ID_123', function: { arguments: '{"p":"a"}' } }] } }] }) })}`,
+    `data: ${JSON.stringify({ body: JSON.stringify({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }) })}`,
+    'data: [DONE]',
+  ].join('\n\n')
+
+  let call: { id: string; name: string; arguments: string } | null = null
+  for await (const c of toStreamChunks(streamOf(frames), 'm')) {
+    if (c.type === 'block-end' && c.block.type === 'tool-call') {
+      call = c.block
+    }
+  }
+  assert.ok(call, '要收到工具调用')
+  const got = call as { id: string; name: string; arguments: string }
+  assert.equal(got.id, 'REAL_ID_123', '真实 id 不能被占位值挡住')
+  assert.equal(got.name, 'read_file')
+  assert.equal(got.arguments, '{"p":"a"}')
+})
+
+test('id 首帧就给时不回退', async () => {
+  const frames = [
+    `data: ${JSON.stringify({ body: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'FIRST_ID', function: { name: 'f', arguments: '{}' } }] } }] }) })}`,
+    'data: [DONE]',
+  ].join('\n\n')
+  let call: { id: string } | null = null
+  for await (const c of toStreamChunks(streamOf(frames), 'm')) {
+    if (c.type === 'block-end' && c.block.type === 'tool-call') call = c.block
+  }
+  assert.equal((call as { id: string } | null)?.id, 'FIRST_ID')
+})
