@@ -299,3 +299,48 @@ test('回归：正文内容完整，不因翻块丢失', async () => {
   const textBlock = ends.find(e => e.type === 'text')
   assert.equal(textBlock?.text, 'Hello world', 'block-end 里的正文也要完整')
 })
+
+test('回归：无名工具调用时 block-start 必须有配对的 block-end', async () => {
+  // 曾经在收尾时把坏块从 map 里删掉，导致已经发出的 block-start 配不到
+  // block-end，DSH 的 assembler 会一直等那个块收口。
+  const frames = [
+    `data: ${JSON.stringify({ body: JSON.stringify({ choices: [{ delta: { content: '我先看看' } }] }) })}`,
+    // 只有 id 没有 name：坏调用
+    `data: ${JSON.stringify({ body: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'bad', function: { arguments: '{}' } }] } }] }) })}`,
+    `data: ${JSON.stringify({ body: JSON.stringify({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }) })}`,
+    'data: [DONE]',
+  ].join('\n\n')
+
+  const starts = new Set<number>()
+  const ends = new Set<number>()
+  let finish: unknown = null
+  try {
+    for await (const c of toStreamChunks(streamOf(frames), 'm')) {
+      if (c.type === 'block-start') starts.add(c.index)
+      if (c.type === 'block-end') ends.add(c.index)
+      if (c.type === 'finish') finish = c.reason
+    }
+  } catch (e) {
+    // 有正文时不该抛，应该用 finish reason 表达
+    assert.fail(`不该抛错，应通过 finish 表达：${(e as Error).message}`)
+  }
+
+  assert.deepEqual([...starts].sort(), [...ends].sort(), '每个 block-start 都要有 block-end')
+  const reason = finish as { kind: string; failure?: { code: string } }
+  assert.equal(reason.kind, 'error', '坏调用要标成错误')
+  assert.equal(reason.failure?.code, 'UNNAMED_TOOL_CALL')
+})
+
+test('无名工具调用且无正文时，明确报错而不是静默结束', async () => {
+  const frames = [
+    `data: ${JSON.stringify({ body: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'bad', function: { arguments: '{}' } }] } }] }) })}`,
+    'data: [DONE]',
+  ].join('\n\n')
+
+  await assert.rejects(async () => {
+    for await (const _ of toStreamChunks(streamOf(frames), 'm')) void _
+  }, (e: unknown) => {
+    assert.match(String((e as Error).message), /没有名字|UNNAMED/, '要说清是无名调用')
+    return true
+  })
+})

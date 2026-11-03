@@ -439,26 +439,14 @@ export async function* toStreamChunks(
   }
   // 无名工具调用要拦掉（照 magpie index.mjs:2181-2196）：
   // 模型发起了调用却始终没给 name，客户端会把一个没有名字的工具存进历史，
-  // 别的 provider 拿到直接拒整轮。有正文就丢掉这个坏调用，没正文就报错。
-  const named = [...toolCalls.entries()].filter(([, slot]) => slot.name.trim() !== '')
-  const droppedCalls = toolCalls.size - named.length
-  if (droppedCalls > 0) {
-    const said = [...textBuffer.values()].join('') + [...reasoningBuffer.values()].join('')
-    if (said.trim() === '') {
-      throw UpstreamError.from(
-        502,
-        JSON.stringify({ code: 502, message: `${model}: 上游返回了没有名字的工具调用` }),
-      )
-    }
-    // 有正文：静默丢掉坏调用，别让它污染历史
-    for (const [upstreamIndex] of toolCalls) {
-      if ((toolCalls.get(upstreamIndex)?.name ?? '').trim() === '') {
-        toolCalls.delete(upstreamIndex)
-        toolIndexes.delete(upstreamIndex)
-      }
-    }
-    sawToolCall = toolCalls.size > 0
-  }
+  // 别的 provider 拿到直接拒整轮。
+  //
+  // 注意：block-start 在收到 delta 时就已经发出去了，所以这里**不能悄悄
+  // 删块**——start 配不到 end，DSH 的 assembler 会一直等这个块收口。
+  // 做法是照常补发 block-end（让块成对），但把整轮判成错误：
+  // 有正文时用户可以拿到内容，没有正文时明确报错让宿主重试。
+  const unnamed = [...toolCalls.values()].filter(slot => slot.name.trim() === '').length
+  const said = [...textBuffer.values()].join('') + [...reasoningBuffer.values()].join('')
 
   for (const [upstreamIndex, slot] of toolCalls) {
     yield {
@@ -466,6 +454,25 @@ export async function* toStreamChunks(
       index: toolIndexes.get(upstreamIndex)!,
       block: { type: 'tool-call', id: slot.id, name: slot.name, arguments: slot.args },
     }
+  }
+
+  if (unnamed > 0 && said.trim() === '') {
+    throw UpstreamError.from(
+      502,
+      JSON.stringify({ code: 502, message: `${model}: 上游返回了没有名字的工具调用` }),
+    )
+  }
+  if (unnamed > 0) {
+    // 有正文：内容照常交给用户，但明确告知这轮的工具调用是坏的
+    yield { type: 'usage', usage: usage ?? { inputTokens: 0, outputTokens: 0 } }
+    yield {
+      type: 'finish',
+      reason: {
+        kind: 'error',
+        failure: { message: `${model}: 上游返回了没有名字的工具调用，已丢弃`, code: 'UNNAMED_TOOL_CALL' },
+      },
+    }
+    return
   }
 
   // 契约：先 usage 再 finish
