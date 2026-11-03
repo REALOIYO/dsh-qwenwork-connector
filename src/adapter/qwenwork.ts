@@ -57,6 +57,8 @@ const LIST_TTL_MS = 5 * 60 * 1000
 const POOL_RETRIES = 2
 /** 单次等待上限，避免卡太久。 */
 const POOL_MAX_WAIT_MS = 20_000
+/** 上游笼统失败（SERVER）时的默认等待秒数。 */
+const TRANSIENT_WAIT = 3
 
 const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms))
 
@@ -263,9 +265,10 @@ export class QwenWorkAdapter {
           if (touched) throw this.#describe(error, account)
 
           if (error instanceof UpstreamError) {
-            // 模型池忙：等一会儿重试同一个账号
-            if (error.code === 'MODEL_POOL_BUSY' && attempt < POOL_RETRIES) {
-              const wait = (error.retryAfter ?? 30) * 1000
+            // 可重试的瞬时失败：模型池抖、上游笼统报错。
+            // 换号无用（同一池子），等一会儿重试同一个账号。
+            if ((error.code === 'MODEL_POOL_BUSY' || error.code === 'SERVER') && attempt < POOL_RETRIES) {
+              const wait = (error.retryAfter ?? TRANSIENT_WAIT) * 1000
               await sleep(Math.min(wait, POOL_MAX_WAIT_MS))
               continue
             }
@@ -350,24 +353,60 @@ export class QwenWorkAdapter {
 
     const read = await resolveImages(refs, this.#attachments, options.signal)
     /** attachmentId → 读好的图片，供 body 构造时查。 */
-    const resolved = read.images
+    let resolved = read.images
 
-    const body = buildBody(
-      options,
-      entry,
-      sessionId,
-      requestId,
-      taskId,
-      this.#prefs?.windowFor(entry.key) ?? 0,
-      resolved,
-      read.failed > 0 ? { failed: read.failed, ...(read.reason !== undefined ? { reason: read.reason } : {}) } : undefined,
-    )
+    // 带图时先按原样发；上游用笼统的 "Error in upstream response" 打回
+    // 时（实测带图请求会被这样拒），降级成纯文本再试一次——
+    // 让用户至少拿到回答，而不是整轮失败。
+    const withImages = totalImages > 0 && resolved.size > 0
+    let degraded = false
+
+    for (let round = 0; ; round++) {
+      const body = buildBody(
+        options,
+        entry,
+        sessionId,
+        requestId,
+        taskId,
+        this.#prefs?.windowFor(entry.key) ?? 0,
+        degraded ? undefined : resolved,
+        read.failed > 0
+          ? { failed: read.failed, ...(read.reason !== undefined ? { reason: read.reason } : {}) }
+          : undefined,
+      )
+      try {
+        yield* this.#post(account, entry, body, options.signal)
+        return
+      } catch (error) {
+        // 只在「带图 + 上游笼统拒绝 + 还没吐过内容」时降级一次
+        if (
+          !degraded &&
+          withImages &&
+          round === 0 &&
+          error instanceof UpstreamError &&
+          (error.code === 'SERVER' || error.code === 'INVALID_REQUEST')
+        ) {
+          degraded = true
+          resolved = new Map()
+          continue
+        }
+        throw error
+      }
+    }
+  }
+
+  /** 发一次构造好的请求体，把流吐出来。 */
+  async *#post(
+    account: StoredAccount,
+    entry: ModelEntry,
+    body: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): AsyncGenerator<StreamChunk> {
     const wire = encodeBody(JSON.stringify(body))
     const url = this.#gateway + CHAT_PATH
     const headers = chatHeaders(url, account, wire, entry.key, entry.source ?? 'system')
 
     const controller = new AbortController()
-    const signal = options.signal
     const onAbort = (): void => controller.abort()
     if (signal) {
       if (signal.aborted) controller.abort()

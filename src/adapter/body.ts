@@ -229,17 +229,50 @@ function reasoningOf(m: HarnessMessage): string {
  * 给最后一条用户消息的末块打 prompt cache 标记。
  * 不打的话每轮都重算，长对话会明显变慢变贵。
  */
+/**
+ * 客户端不会给这几类块打 cache 标记。
+ *
+ * 照 magpie 的 `UNCACHED`：思考、加密思考、工具调用、工具结果。
+ * 给图片块打标记也不行——服务端会直接 400（实测「Error in upstream response」）。
+ */
+const UNCACHED = new Set(['thinking', 'redacted_thinking', 'tool_use', 'tool_result', 'image', 'image_url'])
+
+/**
+ * 给最后一条 user 消息里最后一个可缓存的块打 prompt cache 标记。
+ *
+ * 照 magpie 的 `cacheMarked`：
+ *  - 每个 user 轮的块**同时写进 `contents`**（客户端双写，服务端按 contents 读）
+ *  - 只标最后一条 user 消息，且跳过 UNCACHED 里的类型
+ *  - 从后往前找，找到第一个能标的就停
+ *
+ * 不打标记的话，只认标记缓存的模型（Anthropic 那类）会每轮重算，
+ * 长对话明显变慢变贵。
+ */
 function cacheMarked(messages: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]!
-    if (m.role !== 'user' || !Array.isArray(m.content)) continue
-    const blocks = m.content as Array<Record<string, unknown>>
-    if (blocks.length === 0) continue
-    const last = blocks[blocks.length - 1]!
-    blocks[blocks.length - 1] = { ...last, cache_control: { type: 'ephemeral' } }
-    break
+  // 双写 contents：客户端就是这么发的
+  const out = messages.map(m =>
+    m.role === 'user' && Array.isArray(m.content) ? { ...m, contents: m.content } : m,
+  )
+
+  const last = out[out.length - 1]
+  if (last?.role !== 'user' || !Array.isArray(last.content)) return out
+
+  const blocks = last.content as Array<Record<string, unknown>>
+  // 从后往前找第一个可缓存的块
+  let at = -1
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const type = blocks[i]?.type
+    if (typeof type === 'string' && type !== '' && !UNCACHED.has(type)) {
+      at = i
+      break
+    }
   }
-  return messages
+  if (at < 0) return out
+
+  const marked = blocks.slice()
+  marked[at] = { ...marked[at]!, cache_control: { type: 'ephemeral' } }
+  out[out.length - 1] = { ...last, content: marked, contents: marked }
+  return out
 }
 
 /** 一个模型的请求侧配置。 */

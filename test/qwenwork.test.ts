@@ -51,11 +51,11 @@ async function gateway(
       res.end((out.frames ?? []).join('\n\n') + '\n\n')
     })
   })
-  await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
+  await new Promise<void>(r => server.listen(0, r))
   const addr = server.address()
   const port = typeof addr === 'object' && addr ? addr.port : 0
   return {
-    base: `http://127.0.0.1:${port}`,
+    base: `http://localhost:${port}`,
     calls,
     close: () => new Promise<void>(r => server.close(() => r())),
   }
