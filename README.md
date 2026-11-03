@@ -1,6 +1,8 @@
 # dsh-qwenwork-connector
 
 [![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
+[![install](https://img.shields.io/badge/install-dsh%20plugin%20add-4D6BFE?style=flat-square)](#装)
+[![license](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 
 把**千问办公（QwenWork）**的模型接进 DeepSeek Harness。
 
@@ -201,4 +203,4 @@ node scripts/repro-reasoning-only.mjs     # 分四种条件复现「只有思维
 
 MIT，随便用。详见 [LICENSE](LICENSE)。
 
-第三方组件的版权声明也放在 LICENSE 文件末尾了。
+第三方组件的版权声明见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
