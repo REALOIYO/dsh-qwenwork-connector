@@ -91,8 +91,28 @@ export interface PluginHandle {
  */
 export function apply(ctx: PluginContext, config: PluginConfig = {}): PluginHandle {
   const logger = ctx.logger
-  const cfg = resolveConfig(config)
   const ready = Promise.resolve({ version: 'adapter' })
+
+  // 整段包起来：任何意外异常都只让本插件 FAILED（宿主会记一条
+  // "1 entry did not activate" 警告并继续启动），绝不把异常抛回 Loader。
+  try {
+    return start(ctx, config, logger, ready)
+  } catch (error) {
+    logger.error(
+      `dsh-qwenwork-connect: 启动失败：${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+    )
+    return { ready }
+  }
+}
+
+/** 真正的启动逻辑，由 {@link apply} 兜住异常。 */
+function start(
+  ctx: PluginContext,
+  config: PluginConfig,
+  logger: PluginContext['logger'],
+  ready: Promise<{ version: string }>,
+): PluginHandle {
+  const cfg = resolveConfig(config)
 
   if (!ctx.llm || typeof ctx.llm.registerAdapter !== 'function') {
     logger.error('dsh-qwenwork-connect: llm 服务不可用，适配器无法注册')
@@ -107,9 +127,20 @@ export function apply(ctx: PluginContext, config: PluginConfig = {}): PluginHand
     store,
   })
 
-  // 1. 先注册，选择器立刻可用
-  ctx.llm.registerAdapter([cfg.providerId], adapter)
-  logger.info(`dsh-qwenwork-connect: 已注册 provider "${cfg.providerId}"（${MODELS.length} 个模型）`)
+  // 1. 先注册，选择器立刻可用。
+  //    这一步没有 try/catch 之外的保护：provider id 若与其他插件撞车，
+  //    registerAdapter 会抛错。宁可自己 FAILED，也不要把宿主启动拖下水。
+  try {
+    ctx.llm.registerAdapter([cfg.providerId], adapter)
+    logger.info(`dsh-qwenwork-connect: 已注册 provider "${cfg.providerId}"（${MODELS.length} 个模型）`)
+  } catch (error) {
+    logger.error(
+      `dsh-qwenwork-connect: provider "${cfg.providerId}" 注册失败（可能与已装插件同名）：${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    )
+    return { ready }
+  }
 
   // 2. 后台加载账号
   void store.load().then((accounts: StoredAccount[]) => {

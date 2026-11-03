@@ -89,3 +89,52 @@ test('gateway 尾部斜杠被去掉', () => {
   const cfg = resolveConfig({ gateway: 'https://example.com///' })
   assert.equal(cfg.gateway, 'https://example.com')
 })
+
+test('registerAdapter 抛错时不让异常外泄（只自己失效）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'qw-entry-'))
+  const logs: string[] = []
+  const ctx = {
+    logger: {
+      info: (m: string) => logs.push(`info ${m}`),
+      warn: (m: string) => logs.push(`warn ${m}`),
+      error: (m: string) => logs.push(`error ${m}`),
+    },
+    llm: {
+      registerAdapter() {
+        throw new Error('duplicate provider route')
+      },
+    },
+    emit: () => {},
+    effect: (fn: () => () => void) => {
+      void fn
+    },
+  }
+  // 不应该抛
+  const handle = apply(ctx as never, { dataDir: dir })
+  const ready = await handle.ready
+  assert.equal(ready.version, 'adapter')
+  assert.ok(logs.some(l => l.startsWith('error')), '应记录注册失败')
+  assert.ok(
+    logs.some(l => l.includes('duplicate provider route')),
+    `错误里应带上原因，得到：${logs.join(' | ')}`,
+  )
+})
+
+test('apply 内部任何异常都不外泄', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'qw-entry-'))
+  const logs: string[] = []
+  const ctx = {
+    logger: {
+      info: (m: string) => logs.push(`info ${m}`),
+      warn: (m: string) => logs.push(`warn ${m}`),
+      error: (m: string) => logs.push(`error ${m}`),
+    },
+    llm: { registerAdapter: () => () => {} },
+    emit: () => {},
+    // effect 里抛错，模拟宿主服务异常
+    effect: () => {
+      throw new Error('host service exploded')
+    },
+  }
+  assert.doesNotThrow(() => apply(ctx as never, { dataDir: dir }))
+})
