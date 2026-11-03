@@ -6,7 +6,12 @@
   "description": "QwenWork (千问办公) models for DeepSeek Harness: a native dsh-llm adapter that signs in with QwenWork's own device flow and speaks its agent_chat_generation protocol directly — no separate gateway application.",
   "main": "./lib/index.js",
   "exports": {
-    ".": "./lib/index.js",
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
     "./package.json": "./package.json"
   },
   "keywords": [
@@ -25,7 +30,11 @@
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-llm": "^0.1.2-rc.1 || ^0.1.7-rc.2 || ^0.2.0-rc.1",
-    "@deepseek-ai/cordis": "^4.0.2"
+    "@deepseek-ai/cordis": "^4.0.2",
+    "react": ">=18",
+    "@deepseek-ai/dsh-client-ui-renderer": "*",
+    "@deepseek-ai/dsh-client-locale": "*",
+    "@deepseek-ai/dsh-client-ui-primitives": "*"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-llm": {
@@ -33,12 +42,25 @@
     },
     "@deepseek-ai/cordis": {
       "optional": true
+    },
+    "react": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-renderer": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-locale": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-primitives": {
+      "optional": true
     }
   },
   "scripts": {
     "build": "node build.mjs",
     "test": "node --test \"test/*.test.ts\"",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "verify:real": "node scripts/verify-real.mjs"
   },
   "files": [
     "lib",
@@ -49,6 +71,14 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ],
+      "platform": "web"
     }
   }
 }

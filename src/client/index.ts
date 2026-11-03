@@ -1,0 +1,93 @@
+/**
+ * 插件的前端半边：注册设置侧边栏入口。
+ *
+ * DSH 的设置面板通过 `slots.inject('settings.section', ...)` 收各个插件的
+ * 分节。注册后侧边栏会多一行，点开就是 `QwenWorkSettings`。
+ *
+ * 注意：`settings.section` 只投影 `id` / `order` / `label`，**不提供 icon 字段**，
+ * 所以图标会落到宿主的兜底齿轮。magpie 用 DOM 补丁换图标，这里先不折腾——
+ * 等宿主这个 slot 长出 icon 字段再补，比维护一段 MutationObserver 更划算。
+ *
+ * @module src/client/index.ts
+ */
+
+import { NS, EN, ZH, setLocaleRuntime, text, type LocaleRuntime } from './i18n.ts'
+import { QwenWorkSettings } from './page.tsx'
+
+/** slot 服务的最小面。 */
+interface Slots {
+  inject(name: string, fn: () => unknown): unknown
+  register(
+    entry: { name: string; id: string; order: number; locale?: string; label?: () => string },
+    component: unknown,
+  ): unknown
+}
+
+/** localStorage 的最小面。 */
+interface ClientLocale extends LocaleRuntime {
+  register(ns: string, lang: string, dict: Record<string, string>): () => void
+}
+
+/** 前端上下文（不 import 宿主包）。 */
+export interface ClientContext {
+  locale: ClientLocale
+  slots: Slots
+  effect?(fn: () => () => void, label?: string): unknown
+}
+
+/** 注册文案字典，兼容新老宿主签名。 */
+function registerDictionaries(ctx: ClientContext): void {
+  try {
+    ctx.locale.register(NS, { zh: ZH, en: EN })
+    return
+  } catch {
+    // 老宿主只认按语言的注册
+  }
+  try {
+    ctx.locale.register(NS, 'zh', ZH)
+    ctx.locale.register(NS, 'en', EN)
+  } catch {
+    // locale 是尽力而为：页面有内置兜底文案
+  }
+}
+
+/** 前端入口。 */
+export function apply(ctx: ClientContext): void {
+  setLocaleRuntime(ctx.locale)
+
+  if (typeof ctx.effect === 'function') {
+    try {
+      ctx.effect(
+        () => {
+          registerDictionaries(ctx)
+          return () => {
+            setLocaleRuntime(undefined)
+          }
+        },
+        'dsh-qwenwork-connect: locale dictionaries',
+      )
+    } catch {
+      registerDictionaries(ctx)
+    }
+  } else {
+    registerDictionaries(ctx)
+  }
+
+  ctx.slots.inject('settings.section', () =>
+    ctx.slots.register(
+      {
+        name: 'settings.section',
+        id: 'dsh-qwenwork-connect',
+        order: 13,
+        locale: NS,
+        label: () => text('nav'),
+      },
+      QwenWorkSettings,
+    ),
+  )
+}
+
+/** 必须有这两个服务才能工作。 */
+export const inject = ['slots', 'locale']
+
+export { NS }

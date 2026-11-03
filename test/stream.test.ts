@@ -141,13 +141,57 @@ test('max-tokens 结束映射正确', async () => {
   assert.equal(fin.reason.kind, 'max-tokens')
 })
 
-test('帧内错误抛 UpstreamError 并带 code', async () => {
+test('帧内额度错误归类为 QUOTA_EXCEEDED', async () => {
   const frames = [`data: ${JSON.stringify({ body: JSON.stringify({ error: { message: 'usage limit reached', code: 429 } }) })}`]
   await assert.rejects(async () => {
     for await (const _ of toStreamChunks(streamOf(...frames), 'm')) void _
   }, (e: unknown) => {
     const err = e as { code?: string; message: string }
     assert.equal(err.code, 'QUOTA_EXCEEDED')
+    return true
+  })
+})
+
+test('上游 429「All models failed」能读出原始信息', async () => {
+  // 实测上游模型池打满时返回这个，message 原样保留给用户排查
+  const frame429 = `data: ${JSON.stringify({ body: JSON.stringify({ code: '429', message: 'All models failed' }), statusCodeValue: 429, statusCode: 'Too Many Requests' })}`
+  await assert.rejects(async () => {
+    for await (const _ of toStreamChunks(streamOf(frame429), 'm')) void _
+  }, (e: unknown) => {
+    const err = e as { code?: string; message: string }
+    assert.ok(err.message.includes('All models failed'), `应保留上游原话，得到 ${err.message}`)
+    return true
+  })
+})
+
+test('额度码 110-122 判为 QUOTA_EXCEEDED', async () => {
+  const frame = `data: ${JSON.stringify({ body: JSON.stringify({ code: '110', message: 'credit exhausted' }) })}`
+  await assert.rejects(async () => {
+    for await (const _ of toStreamChunks(streamOf(frame), 'm')) void _
+  }, (e: unknown) => {
+    assert.equal((e as { code?: string }).code, 'QUOTA_EXCEEDED')
+    return true
+  })
+})
+
+test('请求码 100400 判为 INVALID_REQUEST（换号无用）', async () => {
+  const frame = `data: ${JSON.stringify({ body: JSON.stringify({ code: '100400', message: 'content not supported' }) })}`
+  await assert.rejects(async () => {
+    for await (const _ of toStreamChunks(streamOf(frame), 'm')) void _
+  }, (e: unknown) => {
+    assert.equal((e as { code?: string }).code, 'INVALID_REQUEST')
+    return true
+  })
+})
+
+test('排队码 10605 判为 QUEUED 并带 Retry-After', async () => {
+  const frame = `data: ${JSON.stringify({ body: JSON.stringify({ code: '10605', message: 'busy', queue: { isQueued: true, retryAfterSeconds: 12 } }) })}`
+  await assert.rejects(async () => {
+    for await (const _ of toStreamChunks(streamOf(frame), 'm')) void _
+  }, (e: unknown) => {
+    const err = e as { code?: string; retryAfter?: number }
+    assert.equal(err.code, 'QUEUED')
+    assert.equal(err.retryAfter, 12)
     return true
   })
 })

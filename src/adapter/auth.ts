@@ -104,15 +104,26 @@ export function startDeviceSignIn(gateway = GATEWAY, pollInterval = DEFAULT_POLL
           const r = await openapi(gateway, '/api/v1/deviceToken/poll', {
             query: { nonce, verifier, challenge_method: 'S256' },
           })
-          const body = r.json as { token?: unknown } | null
+          const body = r.json as {
+            token?: unknown
+            errorCode?: unknown
+            errorMessage?: unknown
+          } | null
           if (r.status === 200 && String(body?.token ?? '').trim() !== '') {
             device = body as DeviceToken
             break
           }
-          if (r.status >= 400 && r.status < 500 && r.status !== 408 && r.status !== 429) {
-            // 4xx（非临时性）说明这次登录已经无效，不再空转
-            lastError = r.text.trim().slice(0, 200)
-            throw new Error(`qwenwork: 授权被拒绝 (HTTP ${r.status})${lastError ? `：${lastError}` : ''}`)
+          // 404 + 空 body 是「还没授权」的常态（实测如此），继续轮询。
+          // 只有上游明确说这次设备流无效/过期才立刻失败——
+          // 否则用户会一直干等到超时也拿不到原因。
+          const errorCode = String(body?.errorCode ?? '')
+          if (errorCode === 'INVALID_DEVICE_FLOW' || errorCode === 'EXPIRED' || errorCode === 'DENIED') {
+            const said = String(body?.errorMessage ?? r.text).slice(0, 200)
+            throw new Error(`qwenwork: 设备流无效（${errorCode}）：${said}`)
+          }
+          // 403 是明确的拒绝（不是「还没授权」）
+          if (r.status === 403) {
+            throw new Error(`qwenwork: 授权被拒绝（HTTP 403）：${r.text.trim().slice(0, 200)}`)
           }
         } catch (error) {
           if (error instanceof Error && error.message.startsWith('qwenwork:')) throw error

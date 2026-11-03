@@ -97,13 +97,48 @@ test('设备码登录全流程：poll 成功后读 account-context 组装账号'
   }
 })
 
-test('poll 返回 4xx（非临时）立即失败，不空转', async () => {
+test('poll 返回 403 立即失败，不空转到超时', async () => {
   const gw = await fakeGateway({
     '/api/v1/deviceToken/poll': () => ({ status: 403, json: { message: 'denied' } }),
   })
   try {
     const signIn = startDeviceSignIn(gw.base, 20)
     await assert.rejects(signIn.wait(), /授权被拒绝/)
+  } finally {
+    await gw.close()
+  }
+})
+
+test('poll 返回 404（未授权常态）会继续等，不误判失败', async () => {
+  // 实测上游未授权时就是 404 + 空 body，这是常态不是错误
+  let polls = 0
+  const gw = await fakeGateway({
+    '/api/v1/deviceToken/poll': () => {
+      polls += 1
+      if (polls <= 2) return { status: 404, json: {} }
+      return { status: 200, json: { token: 'tok-late', user_id: 'u-late' } }
+    },
+  })
+  try {
+    const signIn = startDeviceSignIn(gw.base, 20)
+    const account = await signIn.wait()
+    assert.equal(account.uid, 'u-late', '404 之后应继续等到 token')
+    assert.ok(polls >= 3, '应至少轮询三次')
+  } finally {
+    await gw.close()
+  }
+})
+
+test('errorCode=INVALID_DEVICE_FLOW 立即失败', async () => {
+  const gw = await fakeGateway({
+    '/api/v1/deviceToken/poll': () => ({
+      status: 400,
+      json: { errorCode: 'INVALID_DEVICE_FLOW', errorMessage: 'device flow poll request is invalid' },
+    }),
+  })
+  try {
+    const signIn = startDeviceSignIn(gw.base, 20)
+    await assert.rejects(signIn.wait(), /设备流无效/)
   } finally {
     await gw.close()
   }

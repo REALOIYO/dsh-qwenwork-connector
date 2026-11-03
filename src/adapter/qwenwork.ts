@@ -149,8 +149,9 @@ export class QwenWorkAdapter {
   /**
    * 发起一次流式请求。
    *
-   * 多账号时按游标轮转：某个账号鉴权/额度失败就换下一个，
-   * 全试过都失败才把最后一个错误抛出去。
+   * 容错策略照 magpie：**插件只负责把失败如实分类上报，重试交给宿主**。
+   * 唯一自己做的一件事是「换账号」——这是多账号场景特有的，且只在
+   * 还没吐出内容时进行。
    */
   async *stream(options: GenerateOptions): AsyncGenerator<StreamChunk> {
     const accounts = this.#store.list()
@@ -171,6 +172,7 @@ export class QwenWorkAdapter {
     for (const index of order) {
       const account = accounts[index]!
       lastAccount = account
+
       // 一旦这一轮吐过内容，就不能换账号重来——用户已经看到了
       let touched = false
       try {
@@ -183,8 +185,9 @@ export class QwenWorkAdapter {
         this.#cursor = index
         return
       } catch (error) {
-        // 出过字就原样抛出，不再换账号
-        if (!touched && error instanceof UpstreamError && isRetryable(error)) {
+        if (touched) throw this.#describe(error, account)
+        // 只有「换个号可能就好」的失败才换号；排队与请求本身的问题换号无用
+        if (error instanceof UpstreamError && isWorthAnotherAccount(error)) {
           lastError = error
           continue
         }
@@ -226,9 +229,9 @@ export class QwenWorkAdapter {
 
       if (!res.ok) {
         const text = await res.text().catch(() => '')
-        throw new UpstreamError(res.status, text.trim() || `HTTP ${res.status}`)
+        throw UpstreamError.from(res.status, text.trim() || `HTTP ${res.status}`)
       }
-      if (!res.body) throw new UpstreamError(502, 'qwenwork: 响应没有 body')
+      if (!res.body) throw UpstreamError.from(502, 'qwenwork: 响应没有 body')
 
       yield* toStreamChunks(res.body as unknown as AsyncIterable<Uint8Array>, entry.displayName)
     } finally {
@@ -250,7 +253,13 @@ export class QwenWorkAdapter {
   }
 }
 
-/** 该不该换账号重试：鉴权/额度/服务端问题值得换，请求本身的问题不值得。 */
-function isRetryable(e: UpstreamError): boolean {
-  return e.code === 'AUTH' || e.code === 'QUOTA_EXCEEDED' || e.code === 'SERVER' || e.code === 'UPSTREAM'
+/**
+ * 换个账号会不会好？
+ *
+ * 会：登录失效（这个号废了）、额度用尽（这个号没钱了）。
+ * 不会：排队（同一个模型池）、请求本身被拒（换谁问都一样）、
+ *       上游供应商挂了（不是账号的问题）。
+ */
+function isWorthAnotherAccount(e: UpstreamError): boolean {
+  return e.code === 'AUTH' || e.code === 'QUOTA_EXCEEDED'
 }

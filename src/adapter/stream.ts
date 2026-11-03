@@ -1,15 +1,17 @@
 /**
- * QwenWork 的 SSE → DSH StreamChunk。
+ * QwenWork 的 SSE → DSH StreamChunk，以及失败分类。
  *
  * 上游的流是两层信封：每个 `data:` 行是一个 JSON，真正的 OpenAI chunk
- * 在它的 `body` 字段里（字符串）。有时 body 还是 `Encode=1` 编码过的。
+ * 在它的 `body` 字段里（字符串）。`Encode=1` 时 body 还是编码过的。
  *
  * 输出的 chunk 必须遵守 DSH 契约：
  *  - 文本/思考用 block-start → delta → block-end
  *  - 最后必须以 `usage` 然后 `finish` 结尾
  *
- * 移植自 `@magpie-community/opencode-qoder-auth@0.2.59`（MIT），
- * 原实现 `events` / `sseLines` / `failure`。
+ * 失败分类严格照搬 `@magpie-community/opencode-qoder-auth@0.2.59` 的
+ * `failure()`（MIT）：**按上游自己的错误码判读，不按 HTTP 状态猜**。
+ * 这一点很重要——同一封 HTTP 429 既可能是额度用尽，也可能是模型池打满，
+ * 靠状态码区分不了。
  *
  * @module src/adapter/stream.ts
  */
@@ -33,27 +35,164 @@ export type FinishReason =
   | { kind: 'aborted'; failure: { message: string; code: string } }
   | { kind: 'error'; failure: { message: string; code: string } }
 
-/** 把上游失败归类成 DSH 认识的 code。 */
-function classify(status: number, message: string): string {
-  if (status === 401 || status === 403) return 'AUTH'
-  if (status === 429 || /quota|credits?|usage limit/i.test(message)) return 'QUOTA_EXCEEDED'
-  if (status === 413) return 'INVALID_REQUEST'
-  if (/context|too long|length/i.test(message) && /exceed|window|maximum/i.test(message)) return 'CONTEXT_WINDOW_EXCEEDED'
-  if (status >= 500) return 'SERVER'
-  if (status >= 400) return 'INVALID_REQUEST'
-  return 'UPSTREAM'
+// ── 失败分类（照搬 magpie 的 failure） ────────────────────────────────────
+
+/** 模型池排队中：上游说"忙"，等一下再来，不是账号问题。 */
+const QUEUED = '10605'
+
+/**
+ * 上游判为「额度 / 用量耗尽」的错误码。
+ * 这套码来自 Qoder 系的客户端协议，QwenWork 复用。
+ */
+const QUOTA_CODES = new Set(['110', '112', '113', '114', '115', '116', '117', '118', '119', '122'])
+
+/**
+ * 上游判为「这次请求本身不行」的错误码：
+ * 敏感内容、不支持、输入过长、媒体过多、自定义模型服务异常。
+ * 这些**不该换账号重试**——换谁问都是一样的结果。
+ */
+const REQUEST_CODES = new Set(['406', '416', '430', '80411', '80412', '100400', '100401', '100403'])
+
+/** 模型自己的上游供应商挂了（不是我们的请求或账号问题）。 */
+const UPSTREAM_FAILED = /\berror in upstream response\b/i
+
+/** 排队时没说等多久，默认 30 秒。 */
+const BUSY_WAIT = 30
+
+/** 失败分类的结果。 */
+export interface Failure {
+  /** 对 DSH 报的状态码。 */
+  status: number
+  /** 给用户看的话。 */
+  message: string
+  /** 归类，用于决定是否值得换账号重试。 */
+  code: string
+  /** 建议等待秒数（仅排队/限流时有）。 */
+  retryAfter?: number
+  /** 是否说明登录已失效。 */
+  lapsed?: boolean
+}
+
+/**
+ * 把上游的失败读成我们认识的东西。
+ *
+ * 顺序就是 magpie 的顺序，每一步都有理由：
+ *  1. 排队码 → 忙，503 + Retry-After（换号无用，池子是同一个）
+ *  2. 额度码 → 429（换号有意义）
+ *  3. 请求码 → 400（换号无用，请求本身不行）
+ *  4. 上游供应商挂 → 502（值得重试）
+ *  5. 401/403 → 登录问题
+ *  6. 其余 429 / 含 quota 字样 → 额度
+ *  7. 兜底原样回
+ */
+export function failure(status: number, text: string): Failure {
+  if (status < 400 || status > 599) status = 502
+  let msg = String(text ?? '').trim()
+  let code = ''
+  let queue: Record<string, unknown> | undefined
+
+  try {
+    let j = JSON.parse(msg) as Record<string, unknown>
+    // 外层可能是 HTTP 包装，真正的排队体藏在 message 里
+    const outerCode = j?.code == null ? '' : String(j.code)
+    if (['', '401', '403'].includes(outerCode) && typeof j?.message === 'string') {
+      try {
+        const inner = JSON.parse(j.message.trim()) as Record<string, unknown>
+        if (inner && !Array.isArray(inner) && String(inner.code) === QUEUED) j = inner
+      } catch {
+        // message 不是 JSON，忽略
+      }
+    }
+    code = j?.code == null ? '' : String(j.code)
+    if (j?.message) msg = String(j.message)
+
+    const rawDetails = j?.details
+    const d = (typeof rawDetails === 'string' ? JSON.parse(rawDetails.trim()) : rawDetails) as
+      | { error?: { message?: string } }
+      | undefined
+    if (d?.error?.message) msg += ': ' + d.error.message
+
+    // 排队状态：可能是对象，也可能是 message 里的 JSON 字符串
+    const q = j?.queue
+    if (q && typeof q === 'object') queue = q as Record<string, unknown>
+    if (!queue && typeof j?.message === 'string' && j.message.trim().startsWith('{')) {
+      const parsed = JSON.parse(j.message.trim()) as Record<string, unknown>
+      if (parsed && typeof parsed === 'object' && ('isQueued' in parsed || 'serviceAvailable' in parsed || 'retryAfterSeconds' in parsed)) {
+        queue = parsed
+      }
+    }
+  } catch {
+    // 不是 JSON，按纯文本处理
+  }
+
+  if (msg === '') msg = `HTTP ${status}`
+
+  // 1. 模型池排队
+  if (code === QUEUED || queue?.isQueued === true || queue?.serviceAvailable === false) {
+    const n = Number(queue?.retryAfterSeconds)
+    const wait = Number.isFinite(n) && n > 0 ? Math.ceil(n) : BUSY_WAIT
+    const model = queue?.modelKey ? ` for ${queue.modelKey}` : ''
+    const ahead = Number(queue?.queueCount) > 0 ? `, ${Math.floor(Number(queue.queueCount))} ahead` : ''
+    const what = queue?.isQueued === true ? 'queued the request' : 'is busy'
+    return {
+      status: 503,
+      message: `千问办公${what === 'is busy' ? ' 正忙' : ' 已排队'}${model}; 约 ${wait} 秒后重试`,
+      code: 'QUEUED',
+      retryAfter: wait,
+    }
+  }
+
+  // 2. 额度用尽
+  if (QUOTA_CODES.has(code)) {
+    return { status: 429, message: `用量已用完：${msg}`, code: 'QUOTA_EXCEEDED' }
+  }
+
+  // 3. 请求本身被拒（换号无用）
+  if (REQUEST_CODES.has(code)) {
+    return { status: 400, message: `千问办公拒绝了这次请求（${code}）：${msg}`, code: 'INVALID_REQUEST' }
+  }
+
+  // 4. 模型背后的供应商挂了
+  if (UPSTREAM_FAILED.test(msg)) {
+    return { status: 502, message: msg, code: 'SERVER' }
+  }
+
+  // 5. 登录失效
+  if (status === 401 || status === 403) {
+    const said = msg && msg !== `HTTP ${status}` ? `（上游说 ${status}：${msg.slice(0, 300)}）` : ''
+    return { status: 401, message: `登录已失效，请重新登录${said}`, code: 'AUTH', lapsed: true }
+  }
+
+  // 6. 明确说额度
+  if (status === 429 || /quota|credits?|usage limit|insufficient/i.test(msg)) {
+    return { status: 429, message: `用量已用完：${msg}`, code: 'QUOTA_EXCEEDED' }
+  }
+
+  // 7. 兜底
+  return { status, message: msg, code: status >= 500 ? 'SERVER' : 'INVALID_REQUEST' }
 }
 
 /** 上游的一个错误。 */
 export class UpstreamError extends Error {
   readonly status: number
   readonly code: string
-  constructor(status: number, message: string) {
-    super(message)
-    this.status = status
-    this.code = classify(status, message)
+  readonly retryAfter?: number
+  readonly lapsed?: boolean
+
+  constructor(f: Failure) {
+    super(f.message)
+    this.status = f.status
+    this.code = f.code
+    if (f.retryAfter !== undefined) this.retryAfter = f.retryAfter
+    if (f.lapsed !== undefined) this.lapsed = f.lapsed
+  }
+
+  static from(status: number, text: string): UpstreamError {
+    return new UpstreamError(failure(status, text))
   }
 }
+
+// ── SSE 解析 ──────────────────────────────────────────────────────────────
 
 /** 逐行切 SSE。 */
 async function* sseLines(body: AsyncIterable<Uint8Array>): AsyncGenerator<string> {
@@ -87,10 +226,9 @@ interface UpstreamChunk {
   usage?: {
     prompt_tokens?: number
     completion_tokens?: number
-    total_tokens?: number
     prompt_tokens_details?: { cached_tokens?: number }
   }
-  error?: { message?: string; code?: number }
+  error?: { message?: string; code?: number | string }
   code?: number | string
   message?: string
 }
@@ -98,8 +236,8 @@ interface UpstreamChunk {
 /**
  * 把 QwenWork 的 SSE 流转成 DSH chunk。
  *
- * @param body     fetch 的 response.body
- * @param model    模型显示名，仅用于错误信息
+ * @param body  fetch 的 response.body
+ * @param model 模型显示名，仅用于错误信息
  */
 export async function* toStreamChunks(
   body: AsyncIterable<Uint8Array>,
@@ -112,18 +250,14 @@ export async function* toStreamChunks(
   const textBuffer = new Map<number, string>()
   const reasoningBuffer = new Map<number, string>()
 
-  /** 上游 tool call 的累积：index -> {id, name, args} */
+  /** 上游 tool call 累积：index -> {id, name, args} */
   const toolCalls = new Map<number, { id: string; name: string; args: string }>()
   const toolIndexes = new Map<number, number>()
+  /** 工具块的下标从 1000 起，和文本/思考块分开，避免撞号。 */
   let nextToolIndex = 1000
   let sawToolCall = false
   let finishReason = ''
   let usage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number } | null = null
-
-  const ok = (): void => {
-    /* noop */
-  }
-  void ok
 
   for await (const raw of sseLines(body)) {
     if (!raw.startsWith('data:')) continue
@@ -137,19 +271,16 @@ export async function* toStreamChunks(
       continue
     }
 
-    // 外层可能直接报错
+    // 外层状态码：非 200 时 body 里是错误信息
     const statusCode = Number(envelope.statusCodeValue ?? envelope.statusCode)
     if (Number.isFinite(statusCode) && statusCode !== 200 && statusCode !== 0) {
       const inner = typeof envelope.body === 'string' ? envelope.body : payload
-      throw new UpstreamError(statusCode >= 400 ? statusCode : 502, messageOf(inner))
+      throw UpstreamError.from(statusCode >= 400 ? statusCode : 502, inner)
     }
 
     // 真正的 chunk 在 body 字段里
     let innerText = typeof envelope.body === 'string' ? envelope.body.trim() : ''
-    if (innerText === '') {
-      // 有些响应直接把 chunk 放在顶层
-      innerText = payload
-    }
+    if (innerText === '') innerText = payload
     if (innerText === '[DONE]') break
 
     // Encode=1 时 body 还是编码过的
@@ -157,7 +288,7 @@ export async function* toStreamChunks(
       try {
         innerText = decodeBody(innerText).trim()
       } catch {
-        // 解不开就按原文试一次
+        // 解不开就按原文试
       }
     }
     if (innerText === '[DONE]') break
@@ -169,9 +300,11 @@ export async function* toStreamChunks(
       continue
     }
 
-    // 帧内报错
+    // 帧内报错（有时是 200 里夹错误）
     if (!Array.isArray(chunk.choices) && (chunk.error !== undefined || (chunk.code != null && chunk.message != null))) {
-      throw new UpstreamError(502, chunk.error?.message ?? chunk.message ?? 'upstream error')
+      const raw = String(chunk.code ?? '')
+      const status = Number.isFinite(Number(raw)) && Number(raw) >= 400 ? Number(raw) : 502
+      throw UpstreamError.from(status, innerText)
     }
 
     const choice = chunk.choices?.[0]
@@ -188,7 +321,7 @@ export async function* toStreamChunks(
     }
 
     if (typeof delta.content === 'string' && delta.content !== '') {
-      // 文本开始前，先把还开着的思考块收口
+      // 文本开始时，把还开着的思考块收口
       if (reasoningOpen) {
         reasoningOpen = false
         yield {
@@ -263,15 +396,14 @@ export async function* toStreamChunks(
     }
   }
   for (const [upstreamIndex, slot] of toolCalls) {
-    const index = toolIndexes.get(upstreamIndex)!
     yield {
       type: 'block-end',
-      index,
+      index: toolIndexes.get(upstreamIndex)!,
       block: { type: 'tool-call', id: slot.id, name: slot.name, arguments: slot.args },
     }
   }
 
-  // 契约要求：先 usage 再 finish
+  // 契约：先 usage 再 finish
   yield { type: 'usage', usage: usage ?? { inputTokens: 0, outputTokens: 0 } }
 
   if (sawToolCall && (finishReason === '' || finishReason === 'tool_calls' || finishReason === 'stop')) {
@@ -301,26 +433,5 @@ export async function* toStreamChunks(
       yield { type: 'finish', reason: { kind: 'stop' } }
       return
     }
-  }
-}
-
-/** 从各种错误外形里挖出可读信息。 */
-function messageOf(raw: string): string {
-  const text = raw.trim()
-  if (text === '') return '上游返回了空错误'
-  try {
-    const j = JSON.parse(text) as { message?: string; error?: { message?: string }; details?: string }
-    const base = j.error?.message ?? j.message ?? text
-    if (typeof j.details === 'string') {
-      try {
-        const d = JSON.parse(j.details) as { error?: { message?: string } }
-        if (d.error?.message) return `${base}: ${d.error.message}`
-      } catch {
-        // details 不是 JSON 就忽略
-      }
-    }
-    return base
-  } catch {
-    return text.slice(0, 500)
   }
 }
