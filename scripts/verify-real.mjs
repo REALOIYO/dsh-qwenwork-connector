@@ -72,16 +72,19 @@ async function askWithTools(model, prompt, tools, history = null) {
   return { text, calls, finish }
 }
 
+// 必须用 DSH 宿主实际传下来的**扁平**形状 { name, description, parameters }。
+//
+// 这里曾用 OpenAI 的 { type:'function', function:{...} } 包装去测，结果脚本
+// 自欺欺人地「通过」了，真实链路里 23 个工具却全被丢弃——模型看不到工具，
+// 只能吐一段思考就结束。用真实形状测，才测得出来。
 const tools = [{
-  type: 'function',
-  function: {
-    name: 'read_file',
-    description: '读取一个文件的内容',
-    parameters: {
-      type: 'object',
-      properties: { path: { type: 'string', description: '文件路径' } },
-      required: ['path'],
-    },
+  name: 'read_file',
+  description: '读取一个文件的内容',
+  parameters: {
+    type: 'object',
+    properties: { path: { type: 'string', description: '文件路径' } },
+    required: ['path'],
+    additionalProperties: false,
   },
 }]
 
