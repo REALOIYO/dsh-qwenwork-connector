@@ -259,3 +259,62 @@ test('分支不是 object 的 oneOf 不动（string|number 保持原样）', () 
   const tools = body.tools as Array<{ function: { parameters: Record<string, any> } }>
   assert.equal(tools[0]!.function.parameters.type, undefined, '混合类型不该被强改成 object')
 })
+
+test('宿主给的扁平工具定义必须透传（回归：曾经全被过滤掉）', () => {
+  // DSH 实际传下来的形状是 { name, description, parameters }，
+  // 没有 type:'function' 也没有 function 包装。曾经只认包装形状，
+  // 结果 23 个工具全部被丢弃，模型无工具可调，只吐思考就结束。
+  const body = buildBody(
+    {
+      messages: [{ role: 'user', content: 'x' }],
+      max_tokens: 1000,
+      tools: [
+        { name: 'list_agents', description: '列出队友', parameters: { type: 'object', properties: {}, additionalProperties: false } },
+        { name: 'ops_bash', description: '跑命令', parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['description'] } },
+      ],
+    },
+    model, 's', 'r', aTask(),
+  )
+
+  const tools = body.tools as Array<{ function: { name: string; description: string; parameters: Record<string, unknown> } }>
+  assert.equal(tools.length, 2, '两个扁平工具都要保留')
+  assert.equal(tools[0]!.function.name, 'list_agents')
+  assert.equal(tools[0]!.function.description, '列出队友')
+  assert.equal(tools[1]!.function.name, 'ops_bash')
+})
+
+test('两种工具形状混着传，一个都不能丢', () => {
+  const body = buildBody(
+    {
+      messages: [{ role: 'user', content: 'x' }],
+      max_tokens: 1000,
+      tools: [
+        { name: 'flat_one', description: '扁平', parameters: { type: 'object', properties: {} } },
+        { type: 'function', function: { name: 'wrapped_one', description: '包装', parameters: { type: 'object', properties: {} } } },
+      ],
+    },
+    model, 's', 'r', aTask(),
+  )
+  const tools = body.tools as Array<{ function: { name: string } }>
+  assert.equal(tools.length, 2)
+  assert.deepEqual(tools.map(t => t.function.name).sort(), ['flat_one', 'wrapped_one'])
+})
+
+test('没有名字的工具被丢弃，但不会连累其他工具', () => {
+  const body = buildBody(
+    {
+      messages: [{ role: 'user', content: 'x' }],
+      max_tokens: 1000,
+      tools: [
+        { name: 'good', description: '正常', parameters: { type: 'object', properties: {} } },
+        { description: '没有名字', parameters: { type: 'object' } },
+        undefined as never,
+        { type: 'function', function: {} },
+      ],
+    },
+    model, 's', 'r', aTask(),
+  )
+  const tools = body.tools as Array<{ function: { name: string } }>
+  assert.equal(tools.length, 1, '只留下有名有姓的')
+  assert.equal(tools[0]!.function.name, 'good')
+})

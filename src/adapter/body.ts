@@ -47,7 +47,15 @@ export interface HarnessMessage {
 /** 发一次聊天的输入。 */
 export interface ChatRequest {
   messages: HarnessMessage[]
-  tools?: Array<{ type?: string; function?: { name?: string; description?: string; parameters?: unknown } }>
+  /**
+   * 工具定义。**两种形状都可能出现**：
+   *   - 扁平：`{ name, description, parameters }` —— DSH 宿主实际传的就是这个
+   *   - 包装：`{ type:'function', function:{ name, ... } }` —— OpenAI 风格
+   *
+   * 所以这里刻意用宽松类型，交给 {@link normaliseTool} 归一化。
+   * 别把它收紧成某一种，否则另一种会被静默丢掉。
+   */
+  tools?: Array<Record<string, unknown>>
   tool_choice?: string
   max_tokens?: number
   max_completion_tokens?: number
@@ -414,10 +422,15 @@ export function buildBody(
   const base = QWENWORK_SYSTEM_PROMPT
   const systemText = systems.length ? `${base}\n\n${systems.join('\n\n')}` : base
 
-  const tools =
-    req.tool_choice !== 'none'
-      ? (req.tools ?? []).filter(t => t?.type === 'function' && t.function?.name)
-      : []
+  // DSH 传下来的工具是**扁平**结构 { name, description, parameters }，
+  // 不是 OpenAI 的 { type:'function', function:{...} } 包装。
+  //
+  // 这里曾经只认包装形式，结果把宿主给的 23 个工具全部过滤掉了：
+  // 模型看不到工具 → 想调用却无从调起 → 只吐一段思考就结束，表现为
+  // 「几秒钟就截断、只有思维链没有正文」。两种形状都要接住。
+  const tools = (req.tool_choice !== 'none' ? (req.tools ?? []) : [])
+    .map(t => normaliseTool(t))
+    .filter((t): t is { name: string; description: string; parameters: unknown } => t !== undefined)
 
   const budget = req.max_completion_tokens ?? req.max_tokens ?? 0
   const maxTokens = req.max_completion_tokens ?? req.max_tokens ?? 32000
@@ -464,9 +477,9 @@ export function buildBody(
     body.tools = tools.map(t => ({
       type: 'function',
       function: {
-        name: t.function!.name,
-        description: t.function?.description ?? '',
-        parameters: normaliseSchema(t.function?.parameters) ?? { type: 'object', properties: {} },
+        name: t.name,
+        description: t.description,
+        parameters: normaliseSchema(t.parameters) ?? { type: 'object', properties: {} },
       },
     }))
   }
@@ -521,6 +534,51 @@ const SUB_ONE = [
 const SUB_LIST = ['anyOf', 'oneOf', 'allOf', 'prefixItems']
 /** 值是「名字 → 子 schema」映射的键。 */
 const SUB_MAP = ['properties', 'patternProperties', '$defs', 'definitions', 'dependentSchemas']
+
+/** 一个已归一化的工具定义。 */
+interface NormalisedTool {
+  name: string
+  description: string
+  parameters: unknown
+}
+
+/**
+ * 把任意形状的工具定义归一化成 `{ name, description, parameters }`。
+ *
+ * 认两种形状：
+ *   - DSH 宿主给的扁平结构：`{ name, description, parameters }`
+ *   - OpenAI 风格包装：`{ type:'function', function:{ name, ... } }`
+ *
+ * 认不出来就返回 undefined（该工具被丢弃），调用方要能接受空列表——
+ * 但**不要**因为形状不合预期就把宿主的工具全丢掉，那会让模型
+ * 一个工具都看不到。
+ */
+function normaliseTool(tool: unknown): NormalisedTool | undefined {
+  if (!tool || typeof tool !== 'object') return undefined
+  const t = tool as Record<string, unknown>
+
+  // 包装形状优先（有些人会把包装套在包装里）
+  const inner = t.function
+  if (inner && typeof inner === 'object') {
+    const f = inner as Record<string, unknown>
+    const name = typeof f.name === 'string' ? f.name.trim() : ''
+    if (name === '') return undefined
+    return {
+      name,
+      description: typeof f.description === 'string' ? f.description : '',
+      parameters: f.parameters,
+    }
+  }
+
+  // 扁平形状
+  const name = typeof t.name === 'string' ? t.name.trim() : ''
+  if (name === '') return undefined
+  return {
+    name,
+    description: typeof t.description === 'string' ? t.description : '',
+    parameters: t.parameters,
+  }
+}
 
 function normaliseSchema(schema: unknown): unknown {
   if (!schema || typeof schema !== 'object') return schema
