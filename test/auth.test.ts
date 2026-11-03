@@ -226,7 +226,7 @@ test('AccountStore.sync 真的打到上游并更新额度（而不是读本地�
 
   try {
     const store = new AccountStore(dir)
-    // 登录时的旧快照：900；真实已降到 1234.5678
+    // 登录时的旧快照是 900，上游已经降到别的值 —— 同步要能拉回新值
     await store.upsert({
       uid: 'u-1', access: 'tok', machineId: 'm1', label: 'a@b.c',
       plan: 'basic', balance: '900 credits',
