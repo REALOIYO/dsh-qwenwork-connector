@@ -1,6 +1,6 @@
 {
   "name": "dsh-qwenwork-connector",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": false,
   "type": "module",
   "description": "千问办公（QwenWork）模型接入 DeepSeek Harness：自带设备码登录，直连官方接口，不需要安装桌面客户端，也不需要额外的网关程序。",
