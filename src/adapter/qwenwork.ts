@@ -99,6 +99,13 @@ export interface QwenWorkAdapterOptions {
   prefs?: PrefsStore
   /** 宿主的附件服务，用来把图片附件读成字节。 */
   attachments?: AttachmentStore
+  /**
+   * 上游目录真的换了一份时的回调。
+   *
+   * 适配器不直接碰宿主 ctx：拿到新目录只负责通知，由插件入口决定
+   * 发什么事件。缺省时不通知。
+   */
+  onModelsChanged?: (models: ModelEntry[]) => void
 }
 
 /**
@@ -113,6 +120,7 @@ export class QwenWorkAdapter {
   readonly #store: AccountStore
   readonly #prefs: PrefsStore | undefined
   readonly #attachments: AttachmentStore | undefined
+  readonly #onModelsChanged: ((models: ModelEntry[]) => void) | undefined
   /** 轮转游标：上次成功的账号下标。 */
   #cursor = 0
   /** 上游真实模型目录；拿不到时为兜底快照。 */
@@ -120,7 +128,7 @@ export class QwenWorkAdapter {
   /** 上次拉目录的时间，用于 TTL。 */
   #modelsAt = 0
   /** 正在进行的目录刷新，避免并发重复请求。 */
-  #refreshing: Promise<void> | null = null
+  #refreshing: Promise<ModelEntry[]> | null = null
 
   constructor(opts: QwenWorkAdapterOptions) {
     this.#providerId = opts.providerId ?? 'qwenwork'
@@ -129,6 +137,7 @@ export class QwenWorkAdapter {
     this.#store = opts.store
     this.#prefs = opts.prefs
     this.#attachments = opts.attachments
+    this.#onModelsChanged = opts.onModelsChanged
   }
 
   /** 某个模型当前固定的上下文档位；0 表示自动。 */
@@ -145,6 +154,16 @@ export class QwenWorkAdapter {
   /** 当前模型目录（可能还没拉到真实值）。 */
   get models(): ModelEntry[] {
     return this.#models
+  }
+
+  /**
+   * 上次成功从上游拉到目录的时刻；0 表示还没成功过。
+   *
+   * 用来区分「这次真的回源了」和「回源失败、沿用缓存」——
+   * 只看目录非空是分不出来的，兜底快照本身就是非空的。
+   */
+  get modelsFetchedAt(): number {
+    return this.#modelsAt
   }
 
   // ── 契约方法 ──────────────────────────────────────────────────────────
@@ -329,16 +348,23 @@ export class QwenWorkAdapter {
    *
    * 失败不算致命：继续用当前目录（可能是兜底快照），下次再试。
    * 并发调用共享同一次请求。
+   *
+   * 返回刷新后的目录，供设置页直接把结果画出来。目录内容真的变了
+   * （增删模型、改价、改上下文档位、开关视觉/思考）时触发
+   * {@link QwenWorkAdapterOptions.onModelsChanged}，让宿主重载选择器——
+   * 否则用户点了刷新、页面也说成功了，模型列表还是旧的。
+   *
+   * @param force 跳过 TTL，强制回源
    */
-  async refreshModels(force = false): Promise<void> {
-    if (!force && Date.now() - this.#modelsAt < LIST_TTL_MS) return
+  async refreshModels(force = false): Promise<ModelEntry[]> {
+    if (!force && Date.now() - this.#modelsAt < LIST_TTL_MS) return this.#models
     if (this.#refreshing !== null) return this.#refreshing
 
-    this.#refreshing = (async () => {
+    this.#refreshing = (async (): Promise<ModelEntry[]> => {
       try {
         const accounts = this.#store.list()
         const account = accounts[0]
-        if (account === undefined) return
+        if (account === undefined) return this.#models
 
         const url = this.#gateway + LIST_PATH
         const headers = {
@@ -346,20 +372,34 @@ export class QwenWorkAdapter {
           Accept: 'application/json',
         }
         const res = await fetch(url, { headers })
-        if (!res.ok) return
+        if (!res.ok) return this.#models
         const parsed: unknown = await res.json()
         const models = parseModelListing(parsed)
-        if (models.length === 0) return
+        if (models.length === 0) return this.#models
+
+        const changed = !sameCatalog(this.#models, models)
         this.#models = models
         this.#modelsAt = Date.now()
+        if (changed) this.#notifyModelsChanged()
+        return this.#models
       } catch {
         // 拉不到就继续用旧的
+        return this.#models
       } finally {
         this.#refreshing = null
       }
     })()
 
     return this.#refreshing
+  }
+
+  /** 通知宿主目录变了。回调抛错不能影响刷新本身。 */
+  #notifyModelsChanged(): void {
+    try {
+      this.#onModelsChanged?.(this.#models)
+    } catch {
+      // 通知失败只是选择器不重载，不该让刷新算失败
+    }
   }
 
   /** 用指定账号跑一次。 */
@@ -497,6 +537,36 @@ export class QwenWorkAdapter {
  */
 function isWorthAnotherAccount(e: UpstreamError): boolean {
   return e.code === 'AUTH' || e.code === 'QUOTA_EXCEEDED'
+}
+
+/**
+ * 两份模型目录内容是否一致。
+ *
+ * 只比用户看得见、影响请求的字段：增删模型、改名、改价、改上下文档位、
+ * 开关视觉/思考。一致时不必惊动宿主去重载选择器——刷新按钮会被反复点，
+ * 每次都广播一次纯属噪音。
+ */
+function sameCatalog(a: ModelEntry[], b: ModelEntry[]): boolean {
+  if (a.length !== b.length) return false
+  const pick = (m: ModelEntry): string =>
+    JSON.stringify([
+      m.key,
+      m.displayName,
+      m.description ?? '',
+      m.rate ?? 0,
+      m.rateWas ?? 0,
+      m.free === true,
+      m.isVision === true,
+      m.isReasoning === true,
+      m.efforts ?? [],
+      m.defaultEffort ?? '',
+      m.maxInputTokens ?? 0,
+      m.windows ?? [],
+      m.defaultWindow ?? 0,
+    ])
+  const left = a.map(pick).sort()
+  const right = b.map(pick).sort()
+  return left.every((v, i) => v === right[i])
 }
 
 /** 思考档位的显示名。上游给的是 id，选择器里要人话。 */

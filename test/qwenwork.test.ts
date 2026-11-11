@@ -277,3 +277,67 @@ test('回归：用户选的上下文档位要反映到 resolveModel 的 contextW
   const back = adapter.resolveModel('qwenwork', 'flash')
   assert.equal(back.context.contextWindow, autoWindow, '选自动要回落到默认值')
 })
+
+test('刷新目录：回源拿上游真值，变化时通知宿主', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'qw-adapter-'))
+  const store = new AccountStore(dir)
+  await store.upsert(anAccount())
+
+  // 上游列表返回两个模型，其中一个是我们兜底快照里没有的
+  const listing = JSON.stringify({
+    qwork: [
+      { key: 'flash', display_name: '标准', price_factor: 0.1, is_vl: true, is_reasoning: true },
+      { key: 'brand-new-model', display_name: '新上架的', price_factor: 0.5, is_vl: false },
+    ],
+  })
+  const gw = await gateway(() => ({ text: listing }))
+
+  try {
+    const seen: string[][] = []
+    const adapter = new QwenWorkAdapter({
+      store,
+      gateway: gw.base,
+      onModelsChanged: models => seen.push(models.map(m => m.key)),
+    })
+
+    const models = await adapter.refreshModels(true)
+    assert.equal(models.length, 2, '目录必须取上游给的，不是兜底快照')
+    assert.ok(models.some(m => m.key === 'brand-new-model'), '上游新加的模型要被收进来')
+    assert.ok(models.some(m => m.key === 'pro') === false, '兜底快照里的 pro 不该还留着')
+    assert.deepEqual(seen, [['flash', 'brand-new-model']], '目录变了要通知一次')
+
+    // 再刷一次：内容没变就不该再惊动宿主（刷新按钮会被反复点）
+    await adapter.refreshModels(true)
+    assert.equal(seen.length, 1, '内容没变时不该重复广播')
+  } finally {
+    await gw.close()
+  }
+})
+
+test('刷新目录：上游挂了就沿用当前目录，不抛也不丢模型', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'qw-adapter-'))
+  const store = new AccountStore(dir)
+  await store.upsert(anAccount())
+
+  const gw = await gateway(() => ({ status: 500, text: 'boom' }))
+  try {
+    let notified = 0
+    const adapter = new QwenWorkAdapter({
+      store,
+      gateway: gw.base,
+      onModelsChanged: () => {
+        notified += 1
+      },
+    })
+    const before = adapter.models.length
+    const beforeAt = adapter.modelsFetchedAt
+    assert.equal(beforeAt, 0, '还没成功回源过，时间戳应为 0')
+
+    const after = await adapter.refreshModels(true)
+    assert.equal(after.length, before, '拉取失败要保留原目录')
+    assert.equal(notified, 0, '没变化就不该广播')
+    assert.equal(adapter.modelsFetchedAt, 0, '拉取失败不能把时间戳当成功——否则界面会谎报已回源')
+  } finally {
+    await gw.close()
+  }
+})

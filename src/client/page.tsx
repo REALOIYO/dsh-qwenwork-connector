@@ -47,10 +47,14 @@ interface StatusPayload {
   }>
 }
 
-/** 账号同步（刷新额度）的响应。 */
+/** 账号同步（刷新额度 + 模型列表）的响应。 */
 interface SyncPayload {
   ok: boolean
   accounts: StatusPayload['accounts']
+  /** 顺带回源后的模型目录。 */
+  models?: StatusPayload['models']
+  /** 这次是否真的打了上游拉目录。 */
+  modelsRefreshed?: boolean
   errors: string[]
 }
 
@@ -209,6 +213,8 @@ export function QwenWorkSettings(): React.ReactElement {
   const [copied, setCopied] = useState(false)
   /** 上次同步成功的时刻（仅本次会话，用来给用户一点确认感）。 */
   const [syncedAt, setSyncedAt] = useState('')
+  /** 上次刷新是否连模型列表一起回源了（用于文案区分）。 */
+  const [modelsSynced, setModelsSynced] = useState(true)
   /** 登录开始时的账号数：用来判断有没有新账号进来。 */
   const baseline = useRef(0)
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -321,21 +327,31 @@ export function QwenWorkSettings(): React.ReactElement {
   )
 
   /**
-   * 刷新账号现状（额度/套餐/续期）。
+   * 刷新：额度/套餐/续期 与 模型列表一起重拉。
    *
-   * 必须打 sync 路由——只 load() 读的是本地快照，
-   * 那个数字从登录那刻起就不会再变了。
+   * 必须打 sync 路由——只 load() 读的是本地快照，额度那个数字从登录
+   * 那刻起就不会再变了。模型列表同理：后端会把这次回源的结果一起带回来，
+   * 所以这里直接用它更新，不再多打一次 /status。
    */
   const syncAccounts = useCallback(async () => {
     setBusy(true)
     setSyncedAt('')
     try {
       const data = await request<SyncPayload>('/api/qwenwork/account/sync', 'POST', {})
-      setStatus(prev => (prev === null ? prev : { ...prev, accounts: data.accounts }))
+      setStatus(prev => {
+        if (prev === null) return prev
+        return {
+          ...prev,
+          accounts: data.accounts,
+          // 没带回目录就沿用旧的，别把模型卡片清空
+          models: data.models ?? prev.models,
+        }
+      })
       if (data.errors.length > 0) setError(data.errors.join('\n'))
       else {
         setError('')
         setSyncedAt(new Date().toLocaleTimeString())
+        setModelsSynced(data.modelsRefreshed !== false)
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -435,7 +451,7 @@ export function QwenWorkSettings(): React.ReactElement {
               </Btn>
               {syncedAt !== '' && (
                 <span style={css.ok}>
-                  {text('refreshed')} {syncedAt}
+                  {text(modelsSynced ? 'refreshed' : 'refreshedLocal')} {syncedAt}
                 </span>
               )}
             </div>
@@ -445,7 +461,13 @@ export function QwenWorkSettings(): React.ReactElement {
 
       {/* 模型卡片 */}
       <div style={css.card}>
-        <h3 style={css.cardTitle}>{text('modelSection')}</h3>
+        <div style={css.row}>
+          <h3 style={{ ...css.cardTitle, flex: 1 }}>{text('modelSection')}</h3>
+          {/* 与账号卡片同一个刷新：一次上游往返，额度和模型列表都重新拉 */}
+          <Btn onClick={() => void syncAccounts()} disabled={busy}>
+            {text('refreshModels')}
+          </Btn>
+        </div>
         <p style={css.hint}>{text('modelHint')}</p>
         {status === null ? (
           <p style={css.hint}>{text('loading')}</p>

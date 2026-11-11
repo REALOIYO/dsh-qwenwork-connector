@@ -15,6 +15,7 @@ import { homedir } from 'node:os'
 
 import { AccountStore, startDeviceSignIn, GATEWAY, type StoredAccount } from './adapter/auth.ts'
 import { QwenWorkAdapter, MODELS } from './adapter/qwenwork.ts'
+import type { ModelEntry } from './adapter/catalog.ts'
 import { PrefsStore, AUTO_WINDOW } from './adapter/prefs.ts'
 import type { AttachmentStore } from './adapter/images.ts'
 
@@ -137,6 +138,20 @@ function start(
     store,
     prefs,
     ...(attachments !== undefined ? { attachments } : {}),
+    // 上游目录变了就广播给宿主。
+    //
+    // 宿主按 `llm/models-updated(provider)` 约定重载模型选择器
+    // （见 dsh-llm 的 provider 文档）；不发这个事件的话，插件内部
+    // 拉到再新的目录，已打开的会话选择器也一直显示旧列表——
+    // 表现就是「刷新了还是那几个模型」，跟上写死没区别。
+    onModelsChanged: (models: ModelEntry[]) => {
+      const detail = { provider: cfg.providerId, count: models.length }
+      emitSafe(ctx, 'llm/models-updated', cfg.providerId, detail)
+      // 选择器通常订阅 adapters-updated 重读整个目录，两个都发上，
+      // 免得不同版本的宿主只认其中一个。
+      emitSafe(ctx, 'llm/adapters-updated', cfg.providerId, detail)
+      logger.info(`dsh-qwenwork-connector: 模型目录已更新，${models.length} 个模型`)
+    },
   })
 
   // 1. 先注册，选择器立刻可用。
@@ -172,6 +187,20 @@ function start(
   installRoutes(ctx, cfg, store, prefs, adapter, logger)
 
   return { ready }
+}
+
+/**
+ * 发事件，出错不影响调用方。
+ *
+ * 宿主对未注册的事件名一般是静默忽略，但按钮回调 / 刷新路径不该
+ * 因为通知失败就整个失败。
+ */
+function emitSafe(ctx: PluginContext, event: string, ...args: unknown[]): void {
+  try {
+    ctx.emit?.(event, ...args)
+  } catch {
+    // 通知失败只是 UI 不重载，刷新本身已经成功了
+  }
 }
 
 /**
@@ -285,13 +314,37 @@ function installRoutes(
         })
       })
 
-      // POST /api/qwenwork/account/sync — 向上游重拉额度与套餐
-      // 设置页「刷新」按钮打这里；部分账号失败也返回 200，
-      // 把原因放进 errors，界面可以逐账号显示。
+      // POST /api/qwenwork/account/sync — 向上游重拉额度与套餐，顺带重拉模型目录
+      //
+      // 设置页「刷新」按钮打这里。额度与模型目录都靠上游，用户点一次
+      // 刷新，两样都该是新的：只刷额度会让「上游加了模型 / 改了价」
+      // 这件事永远透着，用户看到的模型列表就跟写死的一样。
+      //
+      // 部分账号失败也返回 200，把原因放进 errors，界面可以逐账号显示。
       registerRoute(`${API_PREFIX}/account/sync`, ['POST'], async () => {
         await store.load()
         const { accounts, errors } = await store.sync(cfg.gateway)
-        logger.info(`dsh-qwenwork-connector: 同步账号 ${accounts.length} 个，失败 ${errors.length} 个`)
+
+        // 目录刷新失败不该算账号刷新失败：额度可能已经拿到了。
+        // 记下原因，跟账号错误一起回给界面。
+        //
+        // 「回源成功」按时间戳判断，不能看目录非空——兜底快照本身非空，
+        // 那样永远显示已回源，等于没判。
+        const lastFetch = adapter.modelsFetchedAt
+        let modelsRefreshed = false
+        try {
+          await adapter.refreshModels(true)
+          modelsRefreshed = adapter.modelsFetchedAt !== lastFetch
+        } catch (error) {
+          errors.push(
+            `模型列表刷新失败：${error instanceof Error ? error.message : String(error)}`,
+          )
+        }
+
+        logger.info(
+          `dsh-qwenwork-connector: 同步账号 ${accounts.length} 个，失败 ${errors.length} 个，` +
+            `模型目录 ${adapter.models.length} 项（${modelsRefreshed ? '已回源' : '未回源，沿用缓存'}）`,
+        )
         return json(200, {
           ok: errors.length === 0,
           accounts: accounts.map(a => ({
@@ -305,6 +358,23 @@ function installRoutes(
             period: a.period,
             syncedAt: a.syncedAt,
           })),
+          // 顺带把新目录带回去，界面不用再打一次 /status
+          models: adapter.models.map(m => ({
+            id: m.key,
+            name: m.displayName,
+            description: m.description,
+            rate: m.rate,
+            rateWas: m.rateWas,
+            free: m.free,
+            vision: m.isVision === true,
+            reasoning: m.isReasoning === true,
+            efforts: m.efforts ?? [],
+            maxInputTokens: m.maxInputTokens,
+            windows: m.windows ?? [],
+            defaultWindow: m.defaultWindow,
+            window: prefs.windowFor(m.key),
+          })),
+          modelsRefreshed,
           errors,
         })
       })
@@ -347,6 +417,9 @@ function installRoutes(
             .then(async account => {
               await store.upsert(account)
               logger.info(`dsh-qwenwork-connector: 账号已登录 ${account.label ?? account.uid}`)
+              // 登录前拉不动目录（接口要签名），所以新账号的模型要在这里补拉。
+              // 不补的话，登录后选择器里还是登录前的兜底快照，得重启才更新。
+              await adapter.refreshModels(true).catch(() => {})
             })
             .catch((error: unknown) => {
               logger.warn(
