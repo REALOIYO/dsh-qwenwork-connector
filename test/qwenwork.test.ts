@@ -28,11 +28,22 @@ function anAccount(uid = 'u1', label = 'A'): StoredAccount {
 /**
  * 假网关：记录收到的请求，按预设回应。
  * handler 可返回 SSE 帧数组或 HTTP 错误。
+ *
+ * 模型列表请求（GET）不经过 handler：它由 `modelList` 统一应答，
+ * 也不计入 `calls`。原因是从「目录没回源时先拉一次」这层保护落地后，
+ * adapter 可能在真正发聊天请求前先补一次目录拉取；不区分的话，
+ * 计数类断言（「400 不该重试」「应请求两次」）会被这次拉取带偏。
  */
 async function gateway(
   handler: (req: { body: string; headers: Record<string, string | string[] | undefined> }) => { status?: number; frames?: string[]; text?: string },
+  modelList?: () => { status?: number; text: string },
 ): Promise<{ base: string; calls: Array<{ body: string; headers: Record<string, string | string[] | undefined> }>; close: () => Promise<void> }> {
   const calls: Array<{ body: string; headers: Record<string, string | string[] | undefined> }> = []
+  // 默认给一份合法的上游目录，让 adapter 能正常拿到 flash
+  const listText = (): { status?: number; text: string } =>
+    modelList !== undefined
+      ? modelList()
+      : { text: JSON.stringify({ qwork: [{ key: 'flash', display_name: '标准', price_factor: 0.1 }] }) }
   const server: Server = createServer((req, res) => {
     const chunks: Buffer[] = []
     req.on('data', (c: Buffer) => {
@@ -40,6 +51,13 @@ async function gateway(
     })
     req.on('end', () => {
       const raw = Buffer.concat(chunks).toString('utf8')
+      // 模型列表是 GET 且不带请求体
+      if (req.method === 'GET') {
+        const out = listText()
+        res.writeHead(out.status ?? 200, { 'content-type': 'application/json' })
+        res.end(out.text)
+        return
+      }
       calls.push({ body: raw, headers: req.headers })
       const out = handler({ body: raw, headers: req.headers })
       const status = out.status ?? 200
@@ -297,7 +315,7 @@ test('刷新目录：回源拿上游真值，变化时通知宿主', async () =>
       { key: 'brand-new-model', display_name: '新上架的', price_factor: 0.5, is_vl: false },
     ],
   })
-  const gw = await gateway(() => ({ text: listing }))
+  const gw = await gateway(() => ({ text: '{}' }), () => ({ text: listing }))
 
   try {
     const seen: string[][] = []
@@ -326,7 +344,7 @@ test('刷新目录：上游挂了就沿用当前目录，不抛也不丢模型',
   const store = new AccountStore(dir)
   await store.upsert(anAccount())
 
-  const gw = await gateway(() => ({ status: 500, text: 'boom' }))
+  const gw = await gateway(() => ({ status: 500, text: 'boom' }), () => ({ status: 500, text: 'boom' }))
   try {
     let notified = 0
     const adapter = new QwenWorkAdapter({
@@ -344,6 +362,53 @@ test('刷新目录：上游挂了就沿用当前目录，不抛也不丢模型',
     assert.equal(after.length, before, '拉取失败要保留原目录')
     assert.equal(notified, 0, '没变化就不该广播')
     assert.equal(adapter.modelsFetchedAt, 0, '拉取失败不能把时间戳当成功——否则界面会谎报已回源')
+  } finally {
+    await gw.close()
+  }
+})
+
+test('回归：会话选了上游新增的模型，不能报「未知模型」', async () => {
+  // 真实场景：选择器拿到的是上游完整目录（含新加的 frontier-1），
+  // 而 adapter 重启后还没来得及回源，手里只有兜底快照。
+  // 早先 prepareCall/stream 直接查这张表，于是「选了新模型就处理失败」。
+  const dir = await mkdtemp(join(tmpdir(), 'qw-adapter-'))
+  const store = new AccountStore(dir)
+  await store.upsert(anAccount())
+
+  const listing = JSON.stringify({
+    qwork: [
+      { key: 'flash', display_name: '标准', price_factor: 0.1 },
+      { key: 'frontier-1', display_name: 'Qwen4-Max 预览版', price_factor: 1.8 },
+    ],
+  })
+  const gw = await gateway(() => ({ frames: [okFrame('新模型答的'), doneFrame] }), () => ({ text: listing }))
+
+  try {
+    const adapter = new QwenWorkAdapter({ store, gateway: gw.base })
+    assert.equal(adapter.modelsFetchedAt, 0, '前置条件：还没回源过')
+    assert.ok(
+      adapter.models.some(m => m.key === 'frontier-1') === false,
+      '前置条件：兜底快照里没有 frontier-1',
+    )
+
+    // 直接按会话里存的模型 key 发起调用
+    const prepared = await adapter.prepareCall('qwenwork', 'frontier-1')
+    assert.equal(prepared.model.id, 'frontier-1', 'prepareCall 前应先回源，能认出新模型')
+    assert.ok(adapter.modelsFetchedAt > 0, 'prepareCall 应触发过一次回源')
+
+    const chunks = []
+    for await (const c of adapter.stream({
+      model: 'frontier-1',
+      messages: [{ role: 'user', content: 'hi' }],
+      max_tokens: 1000,
+    })) {
+      chunks.push(c)
+    }
+    const text = chunks
+      .filter((c: { type: string }) => c.type === 'text-delta')
+      .map(c => (c as unknown as { text: string }).text)
+      .join('')
+    assert.equal(text, '新模型答的')
   } finally {
     await gw.close()
   }

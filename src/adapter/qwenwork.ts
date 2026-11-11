@@ -298,6 +298,14 @@ export class QwenWorkAdapter {
     model: string,
     _signal?: AbortSignal,
   ): Promise<{ model: ResolvedModel; stream: (options: GenerateOptions) => AsyncGenerator<StreamChunk> }> {
+    // 查表前先确认目录是上游真值。
+    //
+    // 会话里存的是模型 key（比如 frontier-1），若此时 #models 还是登录前的
+    // 兜底快照，resolveModel 会把它当成未知模型、按默认窗口处理，紧接着
+    // stream 里查表同样找不到 —— 报「未知模型 frontier-1（可用：flash, pro,
+    // qwen3.8-max-preview）」。用户看到的就是「选了新模型就处理失败」。
+    // 目录一次没回源过（modelsAt === 0）时这里补一次。
+    if (this.#modelsAt === 0) await this.refreshModels(false)
     return {
       model: this.resolveModel(provider, model),
       stream: (options: GenerateOptions) => this.stream(options),
@@ -317,10 +325,17 @@ export class QwenWorkAdapter {
       throw new Error('qwenwork: 还没有登录账号，请在设置页完成设备码登录')
     }
 
+    // 目录没回源过就再试一次：会话里选的可能是上游新加的模型，
+    // 此时 #models 还是兜底快照，直接查表会误判成「未知模型」。
+    if (this.#modelsAt === 0) await this.refreshModels(false)
+
     const entry = this.#models.find(m => m.key === options.model)
     if (!entry) {
+      // 不是本插件列的模型，就是真不认识。把原因说清，别让用户以为
+      // 是登录掉了——顺手带上「目录是否已回源」，方便区分两种情况。
+      const source = this.#modelsAt === 0 ? '内置快照' : '上游目录'
       throw new Error(
-        `qwenwork: 未知模型 "${options.model}"（可用：${this.#models.map(m => m.key).join(', ')}）`,
+        `qwenwork: 未知模型 "${options.model}"（当前${source}里没有；可用：${this.#models.map(m => m.key).join(', ')}）`,
       )
     }
 
