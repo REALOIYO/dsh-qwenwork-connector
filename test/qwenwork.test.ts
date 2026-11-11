@@ -90,13 +90,20 @@ test('7 个契约方法形状正确', async () => {
   assert.ok(policy.retryableCodes.includes('QUEUED'), '上游排队必须可重试')
   assert.equal(adapter.imageRequestPricing('qwenwork', 'flash'), undefined)
 
-  const listed = adapter.listModels('qwenwork')
+  const listed = await adapter.listModels('qwenwork')
   assert.equal(listed.length, MODELS.length)
   for (const m of listed) {
     assert.equal(m.provider, 'qwenwork')
     assert.ok(m.id.length > 0)
     assert.ok(Array.isArray(m.inputModalities))
+    // 倍率走 badge 才能在模型选择器里看见（宿主会把它渲染成名称旁的 Tag）
+    assert.ok(m.badge !== undefined, `${m.id} 应带倍率角标`)
+    assert.ok(m.badge!.text.length > 0)
   }
+  // 标准档 0.1×、高级档 1×、Max 档 1.8×
+  assert.equal(listed.find(m => m.id === 'flash')!.badge!.text, '0.1×')
+  assert.equal(listed.find(m => m.id === 'pro')!.badge!.text, '1×')
+  assert.equal(listed.find(m => m.id === 'qwen3.8-max-preview')!.badge!.text, '1.8×')
 
   const resolved = adapter.resolveModel('qwenwork', 'flash')
   assert.equal(resolved.id, 'flash')

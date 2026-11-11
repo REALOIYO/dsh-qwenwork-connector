@@ -20,7 +20,7 @@ import { randomUUID } from 'node:crypto'
 
 import { AccountStore, GATEWAY, type StoredAccount } from './auth.ts'
 import { buildBody, type ChatRequest } from './body.ts'
-import { FALLBACK_MODELS, parseModelListing, type ModelEntry } from './catalog.ts'
+import { FALLBACK_MODELS, formatRate, parseModelListing, type ModelEntry } from './catalog.ts'
 import { chatHeaders, clientHeaders, cosyHeaders } from './cosy.ts'
 import { markTaskAnswered, sessionOf, taskOf } from './session.ts'
 import { collectImageRefs, resolveImages, type AttachmentStore, type ImageAttachmentRef, type ResolvedImage } from './images.ts'
@@ -207,14 +207,45 @@ export class QwenWorkAdapter {
     return undefined
   }
 
-  /** 选择器里列出的模型。 */
-  listModels(provider: string): Array<{ provider: string; id: string; name: string; inputModalities: string[] }> {
-    return this.#models.map(m => ({
-      provider,
-      id: m.key,
-      name: m.displayName,
-      inputModalities: m.isVision === true ? ['text', 'image'] : ['text'],
-    }))
+  /**
+   * 选择器里列出的模型。
+   *
+   * 倍率走 `badge`：宿主会把它渲染成名称旁一个按 tone 着色的 Tag
+   * （触发按钮在名称前、菜单在名称后），这是除 name 之外唯一能显示
+   * 自定义文字的槽位——`description` 只在部分位置露出，倍率放那里
+   * 用户在选择器里根本看不到。
+   *
+   * 宿主契约里这个方法是 async，所以目录还没拉到上游时**先等一次**，
+   * 别把兜底快照当答案交出去。启动时目录是后台异步拉的，宿主往往在
+   * 拉完之前就来问，早先同步返回兜底值的结果就是：设置页明明已经有
+   * 上游的新模型（比如 Qwen4），模型选择器里却还是原来那三个，
+   * 非得手动点一次刷新才对齐。
+   */
+  async listModels(provider: string): Promise<Array<{
+    provider: string
+    id: string
+    name: string
+    inputModalities: string[]
+    description?: string
+    badge?: { text: string; tone: 'neutral' | 'info' | 'success' | 'warning' }
+  }>> {
+    if (this.#modelsAt === 0) await this.refreshModels(false)
+    return this.#models.map(m => {
+      // 倍率 0 或缺失时 formatRate 给空串，但免费的模型仍要标出来，
+      // 否则它在选择器里没有任何价格信息，和付费的看不出区别。
+      const free = m.free === true || m.rate === undefined || m.rate <= 0
+      const badge = free
+        ? { text: '免费', tone: 'success' as const }
+        : { text: formatRate(m.rate), tone: (m.rate > 1 ? 'info' : 'neutral') as 'info' | 'neutral' }
+      return {
+        provider,
+        id: m.key,
+        name: m.displayName,
+        inputModalities: m.isVision === true ? ['text', 'image'] : ['text'],
+        ...(m.description !== undefined ? { description: m.description } : {}),
+        badge,
+      }
+    })
   }
 
   /**
