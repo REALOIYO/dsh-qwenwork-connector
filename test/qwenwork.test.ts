@@ -17,6 +17,7 @@ import { join } from 'node:path'
 
 import { QwenWorkAdapter, MODELS } from '../src/adapter/qwenwork.ts'
 import { AccountStore, type StoredAccount } from '../src/adapter/auth.ts'
+import type { AttachmentStore } from '../src/adapter/images.ts'
 import { PrefsStore } from '../src/adapter/prefs.ts'
 import { decodeBody } from '../src/adapter/codec.ts'
 
@@ -412,4 +413,97 @@ test('回归：会话选了上游新增的模型，不能报「未知模型」',
   } finally {
     await gw.close()
   }
+})
+
+/** 带图的提问（DSH 传的是附件引用，不是 base64）。 */
+const imageMessage = () => ({
+  role: 'user' as const,
+  content: [
+    { type: 'text', text: '这是什么' },
+    {
+      type: 'image',
+      attachment: { attachmentId: 'sha256:aa', mediaType: 'image/png', bytes: 3, width: 10, height: 10, name: 'a.png' },
+    },
+  ],
+})
+
+/** 一张 10×10 的假图，附件服务就绪后由它吐出。 */
+const tinyStore = (): AttachmentStore => ({
+  async readImageRequest() {
+    return { data: new Uint8Array([1, 2, 3]), mediaType: 'image/png', bytes: 3, width: 10, height: 10 }
+  },
+})
+
+/**
+ * 发一条带图消息跑完一轮，回上游收到的 messages 与解出来的文本。
+ *
+ * 附件服务怎么给由 attach 决定（构造即给 / 惰性解析 / 惰性解析里抛错）。
+ * 目录显式带 is_vl：否则标准档先被判成「不接受图片」，测不到读取链路。
+ */
+async function streamWithImage(
+  attach: Record<string, unknown>,
+): Promise<{ messages: string; text: string }> {
+  const store = new AccountStore(await mkdtemp(join(tmpdir(), 'qw-adapter-')))
+  await store.upsert(anAccount())
+
+  let sentBody = ''
+  const gw = await gateway(
+    req => {
+      sentBody = req.body
+      return { frames: [okFrame('回了'), doneFrame] }
+    },
+    () => ({ text: JSON.stringify({ qwork: [{ key: 'flash', display_name: '标准', price_factor: 0.1, is_vl: true }] }) }),
+  )
+
+  try {
+    const adapter = new QwenWorkAdapter({ store, gateway: gw.base, ...attach })
+    const chunks = []
+    for await (const c of adapter.stream({ model: 'flash', messages: [imageMessage()], max_tokens: 1000 })) chunks.push(c)
+    const decoded = JSON.parse(decodeBody(sentBody)) as Record<string, unknown>
+    return {
+      messages: JSON.stringify(decoded.messages),
+      text: chunks
+        .filter((c: { type: string }) => c.type === 'text-delta')
+        .map(c => (c as unknown as { text: string }).text)
+        .join(''),
+    }
+  } finally {
+    await gw.close()
+  }
+}
+
+test('回归：只在请求时现取附件服务也能把图发出去（issue #1）', async () => {
+  // 只给 attachmentsLookup、不给构造期的 attachments —— 正是插件早于宿主
+  // provision 就绪时的形状。没这层惰性解析的话这条必退化成读不到图。
+  const { messages } = await streamWithImage({ attachmentsLookup: () => tinyStore() })
+  assert.ok(messages.includes('data:image/png;base64,'), '请求时现取到的服务应把图读出来随请求上行')
+  assert.ok(!messages.includes('宿主附件服务不可用'), '不该退化成「读不到图」的说明')
+})
+
+test('附件服务始终不可用时仍明确告知，不静默丢图', async () => {
+  const { messages } = await streamWithImage({ attachmentsLookup: () => undefined })
+  assert.ok(messages.includes('宿主附件服务不可用'), '真没服务时要留一句说明，让用户知道图没送出去')
+  assert.ok(!messages.includes('data:image/png;base64,'), '没有服务时不该出现图片块')
+})
+
+test('惰性解析器抛错按「没有服务」处理，不带崩整轮', async () => {
+  const { text } = await streamWithImage({
+    attachmentsLookup: () => {
+      throw new Error('host service exploded')
+    },
+  })
+  assert.equal(text, '回了', '取附件失败不该把整轮判死')
+})
+
+test('构造时就把服务给全的话不再走惰性解析（不白查宿主）', async () => {
+  let lookups = 0
+  const { messages } = await streamWithImage({
+    attachments: tinyStore(),
+    attachmentsLookup: () => {
+      lookups += 1
+      return undefined
+    },
+  })
+  assert.ok(messages.includes('data:image/png;base64,'), '应直接用构造时给的服务')
+  assert.equal(lookups, 0, '已经有服务时不该再查一次')
 })

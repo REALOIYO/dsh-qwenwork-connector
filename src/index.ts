@@ -125,10 +125,12 @@ function start(
   const store = new AccountStore(cfg.dataDir)
   const prefs = new PrefsStore(cfg.dataDir)
 
-  // 附件服务是可选依赖：没有它时图片无法上行（会明确告知，而不是静默丢）
+  // 附件服务是可选依赖：没有它时图片无法上行（会明确告知，而不是静默丢）。
+  // 这里取到的只当快照，另外把 `readAttachments` 交给适配器按请求重试——
+  // 第三方 bundle 早于宿主 provision 加载，启动这一枪经常打空（issue #1）。
   const attachments = readAttachments(ctx)
   if (attachments === undefined) {
-    logger.warn('dsh-qwenwork-connector: 附件服务不可用，图片消息将无法发送')
+    logger.info('dsh-qwenwork-connector: 附件服务尚未就绪，改由每次请求时重试解析')
   }
 
   const adapter = new QwenWorkAdapter({
@@ -138,6 +140,7 @@ function start(
     store,
     prefs,
     ...(attachments !== undefined ? { attachments } : {}),
+    attachmentsLookup: () => readAttachments(ctx),
     // 上游目录变了就广播给宿主。
     //
     // 宿主按 `llm/models-updated(provider)` 约定重载模型选择器

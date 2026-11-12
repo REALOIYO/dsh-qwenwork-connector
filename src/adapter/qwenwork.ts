@@ -100,6 +100,14 @@ export interface QwenWorkAdapterOptions {
   /** 宿主的附件服务，用来把图片附件读成字节。 */
   attachments?: AttachmentStore
   /**
+   * 惰性取附件服务：每次请求现取一次。
+   *
+   * `attachments` 在构造时定死，而宿主的附件服务未必比插件先就绪——第三方
+   * bundle 加载早于服务 provision，那时 `ctx.get('attachments')` 是 undefined，
+   * 之后每张图都会退化成「宿主附件服务不可用」（issue #1）。
+   */
+  attachmentsLookup?: () => AttachmentStore | undefined
+  /**
    * 上游目录真的换了一份时的回调。
    *
    * 适配器不直接碰宿主 ctx：拿到新目录只负责通知，由插件入口决定
@@ -120,6 +128,7 @@ export class QwenWorkAdapter {
   readonly #store: AccountStore
   readonly #prefs: PrefsStore | undefined
   readonly #attachments: AttachmentStore | undefined
+  readonly #attachmentsLookup: (() => AttachmentStore | undefined) | undefined
   readonly #onModelsChanged: ((models: ModelEntry[]) => void) | undefined
   /** 轮转游标：上次成功的账号下标。 */
   #cursor = 0
@@ -137,7 +146,23 @@ export class QwenWorkAdapter {
     this.#store = opts.store
     this.#prefs = opts.prefs
     this.#attachments = opts.attachments
+    this.#attachmentsLookup = opts.attachmentsLookup
     this.#onModelsChanged = opts.onModelsChanged
+  }
+
+  /**
+   * 这次请求用哪个附件服务：构造时给的就直接用（早就绪时一次都不多查宿主），
+   * 空了才回落 `#attachmentsLookup` 现取，服务晚挂载也能恢复。
+   * 解析器抛错按「没有服务」处理——图片是增强，不该把整轮请求带崩。
+   */
+  #resolveAttachments(): AttachmentStore | undefined {
+    if (this.#attachments !== undefined) return this.#attachments
+    if (typeof this.#attachmentsLookup !== 'function') return undefined
+    try {
+      return this.#attachmentsLookup()
+    } catch {
+      return undefined
+    }
   }
 
   /** 某个模型当前固定的上下文档位；0 表示自动。 */
@@ -476,7 +501,7 @@ export class QwenWorkAdapter {
       })
     }
 
-    const read = await resolveImages(refs, this.#attachments, options.signal)
+    const read = await resolveImages(refs, this.#resolveAttachments(), options.signal)
     /** attachmentId → 读好的图片，供 body 构造时查。 */
     let resolved = read.images
 
