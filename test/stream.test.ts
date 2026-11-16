@@ -107,9 +107,32 @@ test('usage 被读出来', async () => {
     frame({ choices: [{ delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 100, completion_tokens: 20, prompt_tokens_details: { cached_tokens: 60 } } }),
   ])
   const usage = chunks.find(c => c.type === 'usage') as { usage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number } }
-  assert.equal(usage.usage.inputTokens, 100)
+  // prompt_tokens(100) 含缓存，DSH 的 inputTokens 只算未命中 → 100 - 60 = 40
+  assert.equal(usage.usage.inputTokens, 40)
   assert.equal(usage.usage.outputTokens, 20)
   assert.equal(usage.usage.cacheReadTokens, 60)
+})
+
+test('缓存命中从 prompt 里减掉，三档互不重叠', async () => {
+  const chunks = await collect([
+    frame({ choices: [{ delta: { content: 'hi' } }] }),
+    frame({ choices: [{ delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 1000, completion_tokens: 50, prompt_tokens_details: { cached_tokens: 960 } } }),
+  ])
+  const usage = (chunks.find(c => c.type === 'usage') as { usage: { inputTokens: number; cacheReadTokens?: number } }).usage
+  assert.equal(usage.inputTokens, 40)
+  assert.equal(usage.cacheReadTokens, 960)
+  // 未命中 + 命中 应还原成上游 prompt 总量
+  assert.equal(usage.inputTokens + (usage.cacheReadTokens ?? 0), 1000)
+})
+
+test('缓存数大于 prompt 时夹住，不算出负数', async () => {
+  const chunks = await collect([
+    frame({ choices: [{ delta: { content: 'hi' } }] }),
+    frame({ choices: [{ delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 5, prompt_tokens_details: { cached_tokens: 50 } } }),
+  ])
+  const usage = (chunks.find(c => c.type === 'usage') as { usage: { inputTokens: number; cacheReadTokens?: number } }).usage
+  assert.equal(usage.inputTokens, 0)
+  assert.equal(usage.cacheReadTokens, 10)
 })
 
 test('[DONE] 结束不报错', async () => {

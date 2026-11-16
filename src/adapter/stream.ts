@@ -427,11 +427,16 @@ export async function* toStreamChunks(
     }
 
     if (chunk.usage) {
-      const cached = chunk.usage.prompt_tokens_details?.cached_tokens
+      // 上游 prompt_tokens 含缓存命中，而 DSH 的 inputTokens / cacheReadTokens
+      // 互不重叠（前者只算未命中），原样透传会让缓存被计两次、命中率腰斩。
+      const promptTotal = Number(chunk.usage.prompt_tokens ?? 0)
+      let cached = chunk.usage.prompt_tokens_details?.cached_tokens
+      if (typeof cached !== 'number' || !(cached > 0)) cached = 0
+      if (cached > promptTotal) cached = promptTotal
       usage = {
-        inputTokens: Number(chunk.usage.prompt_tokens ?? 0),
+        inputTokens: promptTotal - cached,
         outputTokens: Number(chunk.usage.completion_tokens ?? 0),
-        ...(typeof cached === 'number' && cached > 0 ? { cacheReadTokens: cached } : {}),
+        ...(cached > 0 ? { cacheReadTokens: cached } : {}),
       }
     }
   }
