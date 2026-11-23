@@ -33,6 +33,8 @@ interface StatusPayload {
     windows?: number[]
     defaultWindow?: number
     window?: number
+    /** 是否被用户从模型选择器里隐藏。设置页列的是全量目录，所以这里必须带回来。 */
+    hidden?: boolean
   }>
   accounts: Array<{
     uid: string
@@ -150,6 +152,32 @@ const css = {
     border: '1px solid var(--dsw-alias-border-l2)',
     color: 'var(--dsw-alias-label-secondary)',
   },
+  /**
+   * 右侧控件列：固定宽度，每张卡都占。
+   *
+   * 上游只给一档上下文的模型不渲染「上下文」下拉框，若这一列按内容自适应，
+   * 有下拉框的卡片和没有的卡片里，「在选择器里显示」会左右错位。
+   * 给死宽度 + 右对齐，两列永远对齐。
+   */
+  controlColumn: {
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: 4,
+    alignItems: 'flex-end' as const,
+    flex: 'none',
+    width: 104,
+  },
+  /**
+   * 上游只给一档上下文时，「上下文」那一列仍要占位。
+   *
+   * 开关列在它左边：这一列若整个消失，开关就会右移一个列宽，卡片之间对不齐。
+   * 用透明占位（不画边框、不放文字）——只补布局，不新增「这里坏了」的观感。
+   */
+  windowSpacer: {
+    display: 'block',
+    flex: 'none',
+    width: 104,
+  },
 } as const
 
 /** 带超时的 JSON 请求。 */
@@ -170,6 +198,55 @@ async function request<T>(path: string, method = 'GET', body?: unknown): Promise
   } finally {
     clearTimeout(timer)
   }
+}
+
+/**
+ * 一个小开关（不依赖宿主组件库，纯 button + span + CSS 变量）。
+ *
+ * 用 `role="switch"` + `aria-checked`：读屏能念出开/关，键盘 Tab+Space 可切换，
+ * 和宿主自己的开关行为一致。
+ */
+function Switch(props: {
+  checked: boolean
+  onChange: (next: boolean) => void
+  disabled?: boolean
+  label: string
+}): React.ReactElement {
+  const { checked, onChange, disabled, label } = props
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      title={label}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      style={{
+        width: 38,
+        height: 22,
+        flex: 'none',
+        padding: 2,
+        borderRadius: 999,
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.5 : 1,
+        border: '1px solid var(--dsw-alias-border-l2)',
+        background: checked ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-bg-layer-2, transparent)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: checked ? 'flex-end' : 'flex-start',
+      }}
+    >
+      <span
+        style={{
+          width: 16,
+          height: 16,
+          borderRadius: 999,
+          background: checked ? 'var(--dsw-alias-bg-layer-1)' : 'var(--dsw-alias-label-tertiary)',
+        }}
+      />
+    </button>
+  )
 }
 
 /** 一个简单的按钮（不依赖宿主组件库）。 */
@@ -327,6 +404,26 @@ export function QwenWorkSettings(): React.ReactElement {
   )
 
   /**
+   * 显示 / 隐藏某个模型（只影响输入框下方那个选择器）。
+   *
+   * 后端改完会广播 models-updated，宿主的选择器立刻重载，不用重启 DSH。
+   */
+  const setVisibility = useCallback(
+    async (model: string, hidden: boolean) => {
+      setBusy(true)
+      try {
+        await request('/api/qwenwork/visibility', 'POST', { model, hidden })
+        await load()
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e))
+      } finally {
+        setBusy(false)
+      }
+    },
+    [load],
+  )
+
+  /**
    * 刷新：额度/套餐/续期 与 模型列表一起重拉。
    *
    * 必须打 sync 路由——只 load() 读的是本地快照，额度那个数字从登录
@@ -469,12 +566,27 @@ export function QwenWorkSettings(): React.ReactElement {
           </Btn>
         </div>
         <p style={css.hint}>{text('modelHint')}</p>
+        <p style={css.hint}>{text('pickerHint')}</p>
+        {models.length > 0 && (
+          <p style={css.hint}>
+            {text('shownCount', {
+              shown: models.filter(m => m.hidden !== true).length,
+              total: models.length,
+            })}
+          </p>
+        )}
         {status === null ? (
           <p style={css.hint}>{text('loading')}</p>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {models.map(m => (
-              <div key={m.id} style={css.modelRow}>
+              <div
+                key={m.id}
+                style={{
+                  ...css.modelRow,
+                  // 隐藏的模型压暗一点，一眼能看出它不在选择器里
+                  opacity: m.hidden === true ? 0.55 : 1,
+                }}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0, flex: 1 }}>
                   <div style={css.row}>
                     <strong style={{ fontSize: 13, color: 'var(--dsw-alias-label-primary)' }}>{m.name}</strong>
@@ -500,8 +612,18 @@ export function QwenWorkSettings(): React.ReactElement {
                       : ''}
                   </span>
                 </div>
-                {(m.windows ?? []).length > 1 && (
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-end' }}>
+                <label style={css.controlColumn}>
+                  <span style={css.hint}>{text('pickerSection')}</span>
+                  <Switch
+                    checked={m.hidden !== true}
+                    disabled={busy}
+                    label={text('pickerSection')}
+                    onChange={next => void setVisibility(m.id, !next)}
+                  />
+                  <span style={css.hint}>{text(m.hidden === true ? 'pickerHidden' : 'pickerShown')}</span>
+                </label>
+                {(m.windows ?? []).length > 1 ? (
+                  <label style={css.controlColumn}>
                     <span style={css.hint}>{text('contextWindow')}</span>
                     <select
                       value={String(m.window ?? 0)}
@@ -517,6 +639,9 @@ export function QwenWorkSettings(): React.ReactElement {
                       ))}
                     </select>
                   </label>
+                ) : (
+                  // 只有一档：不画下拉框，但把列宽占住，开关才不会左右错位
+                  <span style={css.windowSpacer} />
                 )}
               </div>
             ))}

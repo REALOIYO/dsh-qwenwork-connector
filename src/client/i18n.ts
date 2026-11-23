@@ -52,6 +52,12 @@ export const ZH: Dict = {
   maxInput: '最大输入',
   contextWindow: '上下文',
   contextAuto: '自动',
+  pickerSection: '在选择器里显示',
+  pickerShown: '显示中',
+  pickerHidden: '已隐藏',
+  pickerHint:
+    '关掉后这个模型不出现在输入框下方的选择器里；已经选过它的会话照常能发，重新打开即可恢复。注意：若某会话当前正用着被隐藏的模型，那个输入框会显示「选择模型」而不是模型名——把开关打开就回来了。',
+  shownCount: '显示 {shown} / {total} 个',
 
   cancel: '取消',
   error: '出错了',
@@ -97,6 +103,12 @@ export const EN: Dict = {
   maxInput: 'max input',
   contextWindow: 'Context',
   contextAuto: 'Auto',
+  pickerSection: 'Show in picker',
+  pickerShown: 'Shown',
+  pickerHidden: 'Hidden',
+  pickerHint:
+    'Turn this off to drop the model from the picker under the input box. Sessions already using it keep working; turn it back on to restore. Note: a session currently on a hidden model shows "Select model" instead of its name until you turn it back on.',
+  shownCount: 'Showing {shown} of {total}',
 
   cancel: 'Cancel',
   error: 'Error',

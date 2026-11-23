@@ -22,12 +22,19 @@ interface StoredPrefs {
   version: 1
   /** 模型 key → 固定档位（token 数）；0 或缺省表示自动。 */
   windows: Record<string, number>
+  /**
+   * 用户在设置页关掉「在选择器里显示」的模型 key。
+   *
+   * 只影响可见性：目录本身保持全量，选过该模型的老会话照样能发请求。
+   */
+  hidden?: Record<string, true>
 }
 
 /** 偏好存储。 */
 export class PrefsStore {
   readonly #path: string
   #windows: Record<string, number> = {}
+  #hidden: Record<string, true> = {}
   #loaded = false
 
   constructor(dataDir: string) {
@@ -62,6 +69,12 @@ export class PrefsStore {
         }
       }
     }
+    const hidden = parsed?.hidden
+    if (hidden !== null && hidden !== undefined && typeof hidden === 'object') {
+      for (const [key, value] of Object.entries(hidden)) {
+        if (value === true && key.trim() !== '') this.#hidden[key] = true
+      }
+    }
   }
 
   get path(): string {
@@ -89,6 +102,26 @@ export class PrefsStore {
     return { ...this.#windows }
   }
 
+  /** 某个模型是否被用户从选择器里隐藏。 */
+  isHidden(model: string): boolean {
+    return this.#hidden[model] === true
+  }
+
+  /**
+   * 显示 / 隐藏某个模型。
+   *
+   * 只写可见性，不动档位偏好：隐藏期间上次选的上下文档位仍留着，
+   * 重新显示时不用重挑。
+   */
+  async setHidden(model: string, hidden: boolean): Promise<void> {
+    await this.load()
+    const key = model.trim()
+    if (key === '') throw new Error('qwenwork: 模型 key 不能为空')
+    if (hidden) this.#hidden[key] = true
+    else delete this.#hidden[key]
+    await this.#flush()
+  }
+
   /** 设置某模型的档位；传 0 恢复自动。 */
   async setWindow(model: string, tokens: number): Promise<void> {
     await this.load()
@@ -104,7 +137,11 @@ export class PrefsStore {
   async #flush(): Promise<void> {
     await mkdir(dirname(this.#path), { recursive: true })
     const tmp = `${this.#path}.${process.pid}.tmp`
-    const payload: StoredPrefs = { version: 1, windows: this.#windows }
+    const payload: StoredPrefs = {
+      version: 1,
+      windows: this.#windows,
+      ...(Object.keys(this.#hidden).length > 0 ? { hidden: this.#hidden } : {}),
+    }
     await writeFile(tmp, JSON.stringify(payload, null, 2), 'utf8')
     await rename(tmp, this.#path)
   }

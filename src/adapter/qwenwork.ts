@@ -151,9 +151,37 @@ export class QwenWorkAdapter {
     await this.#prefs.setWindow(model, tokens)
   }
 
-  /** 当前模型目录（可能还没拉到真实值）。 */
+  /** 当前模型目录（可能还没拉到真实值）。全量，含被隐藏的。 */
   get models(): ModelEntry[] {
     return this.#models
+  }
+
+  /**
+   * 选择器该看到的那部分目录。
+   *
+   * 隐藏只影响可见性，不影响可用性：`#models` 与 `resolveModel` 仍是全量，
+   * 所以选过某个模型的老会话照常发得出去，不会因为「被隐藏」判成未知模型。
+   * 全被隐藏时退回全量——空选择器会让用户以为插件坏了。
+   */
+  #visibleModels(): ModelEntry[] {
+    const prefs = this.#prefs
+    if (prefs === undefined) return this.#models
+    const shown = this.#models.filter(m => !prefs.isHidden(m.key))
+    return shown.length > 0 ? shown : this.#models
+  }
+
+  /**
+   * 显示 / 隐藏某个模型（设置页的开关打这里）。
+   *
+   * 改完必须通知宿主重载目录：宿主的选择器是按 `llm/models-updated`
+   * 重读 `listModels` 的，不发这个事件的话，用户拨了开关、设置页也变了，
+   * 输入框下面那个选择器却还是旧的，得重启才生效。
+   */
+  async setModelVisibility(model: string, hidden: boolean): Promise<void> {
+    const prefs = this.#prefs
+    if (prefs === undefined) throw new Error('qwenwork: 偏好存储未初始化')
+    await prefs.setHidden(model, hidden)
+    this.#notifyModelsChanged()
   }
 
   /**
@@ -230,7 +258,7 @@ export class QwenWorkAdapter {
     badge?: { text: string; tone: 'neutral' | 'info' | 'success' | 'warning' }
   }>> {
     if (this.#modelsAt === 0) await this.refreshModels(false)
-    return this.#models.map(m => {
+    return this.#visibleModels().map(m => {
       // 倍率 0 或缺失时 formatRate 给空串，但免费的模型仍要标出来，
       // 否则它在选择器里没有任何价格信息，和付费的看不出区别。
       const free = m.free === true || m.rate === undefined || m.rate <= 0
