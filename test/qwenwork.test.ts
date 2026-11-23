@@ -11,7 +11,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer, type Server } from 'node:http'
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -412,4 +412,99 @@ test('回归：会话选了上游新增的模型，不能报「未知模型」',
   } finally {
     await gw.close()
   }
+})
+
+test('隐藏的模型从选择器消失，但老会话仍能发得出去', async () => {
+  // 隐藏只改可见性：`models` 全量与 `resolveModel` 都不动。
+  // 否则正在用这个模型的会话会突然被判成「未知模型」，历史对话直接发不出去。
+  const dir = await mkdtemp(join(tmpdir(), 'qw-visible-'))
+  const prefs = new PrefsStore(dir)
+  await prefs.load()
+  const adapter = new QwenWorkAdapter({ store: new AccountStore(dir), prefs })
+
+  const before = (await adapter.listModels('qwenwork')).map(m => m.id)
+  assert.ok(before.includes('pro'), '默认应显示全部模型')
+
+  await adapter.setModelVisibility('pro', true)
+
+  const after = (await adapter.listModels('qwenwork')).map(m => m.id)
+  assert.ok(!after.includes('pro'), '隐藏后选择器里不该再有它')
+  assert.equal(after.length, before.length - 1, '只少被隐藏的那一个')
+
+  assert.ok(adapter.models.some(m => m.key === 'pro'), '全量目录必须留着它')
+  assert.equal(adapter.resolveModel('qwenwork', 'pro').id, 'pro', '隐藏的模型仍要能解析，老会话才发得出去')
+})
+
+test('全部隐藏时退回全量，不留空选择器', async () => {
+  // 空选择器会让用户以为插件坏了，宁可全部显示。
+  const dir = await mkdtemp(join(tmpdir(), 'qw-visible-'))
+  const prefs = new PrefsStore(dir)
+  const adapter = new QwenWorkAdapter({ store: new AccountStore(dir), prefs })
+  const all = adapter.models.map(m => m.key)
+  for (const key of all) await adapter.setModelVisibility(key, true)
+
+  const listed = (await adapter.listModels('qwenwork')).map(m => m.id)
+  assert.deepEqual([...listed].sort(), [...all].sort(), '全隐藏时必须退回全量')
+})
+
+test('隐藏偏好落盘，重启后仍然生效', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'qw-visible-'))
+  const prefs = new PrefsStore(dir)
+  const adapter = new QwenWorkAdapter({ store: new AccountStore(dir), prefs })
+  await adapter.setModelVisibility('flash', true)
+
+  const raw = JSON.parse(await readFile(join(dir, 'prefs.json'), 'utf8'))
+  assert.equal(raw.hidden.flash, true, 'prefs.json 里要留下 hidden 标记')
+
+  // 模拟重启：新实例只靠磁盘
+  const revived = new QwenWorkAdapter({ store: new AccountStore(dir), prefs: new PrefsStore(dir) })
+  const listed = (await revived.listModels('qwenwork')).map(m => m.id)
+  assert.ok(!listed.includes('flash'), '重启后隐藏仍然有效')
+})
+
+test('恢复显示后 prefs.json 不留下空 hidden 键', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'qw-visible-'))
+  const prefs = new PrefsStore(dir)
+  const adapter = new QwenWorkAdapter({ store: new AccountStore(dir), prefs })
+  await adapter.setModelVisibility('flash', true)
+  await adapter.setModelVisibility('flash', false)
+
+  const raw = JSON.parse(await readFile(join(dir, 'prefs.json'), 'utf8'))
+  assert.equal(raw.hidden, undefined, '全恢复后不该留一个空对象')
+  const listed = (await adapter.listModels('qwenwork')).map(m => m.id)
+  assert.ok(listed.includes('flash'), '恢复后要回到选择器里')
+})
+
+test('拨开关会广播目录更新，不用重启宿主', async () => {
+  // 宿主按 `llm/models-updated` 重读 listModels；不发这个事件的话，
+  // 用户拨了开关、设置页也变了，输入框下面那个选择器却还是旧的。
+  const dir = await mkdtemp(join(tmpdir(), 'qw-visible-'))
+  const prefs = new PrefsStore(dir)
+  const seen: string[][] = []
+  const adapter = new QwenWorkAdapter({
+    store: new AccountStore(dir),
+    prefs,
+    onModelsChanged: models => seen.push(models.map(m => m.key)),
+  })
+
+  await adapter.setModelVisibility('pro', true)
+  assert.equal(seen.length, 1, '隐藏必须通知一次')
+  assert.ok(seen[0].includes('pro'), '通知带的是全量目录，宿主按 listModels 自己过滤')
+
+  const listed = (await adapter.listModels('qwenwork')).map(m => m.id)
+  assert.ok(!listed.includes('pro'), '通知之后选择器读到的已经是过滤后的目录')
+})
+
+test('空 key 报错，写错的 key 不会污染选择器', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'qw-visible-'))
+  const prefs = new PrefsStore(dir)
+  const adapter = new QwenWorkAdapter({ store: new AccountStore(dir), prefs })
+  await assert.rejects(async () => {
+    await adapter.setModelVisibility('   ', true)
+  }, /key/)
+
+  // 上游下线了某个模型后，prefs 里会留下指向不存在模型的 key
+  await prefs.setHidden('已下线的模型', true)
+  const listed = (await adapter.listModels('qwenwork')).map(m => m.id)
+  assert.equal(listed.length, adapter.models.length, '多余 key 不该影响任何现存模型的可见性')
 })

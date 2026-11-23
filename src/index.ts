@@ -294,6 +294,9 @@ function installRoutes(
           defaultWindow: m.defaultWindow,
           // 用户当前选定的档位；0 = 自动
           window: prefs.windowFor(m.key),
+          // 这里给的是**全量**目录 + 各自的隐藏标记：设置页必须能列出
+          // 被隐藏的模型，否则用户一隐藏就再也找不回来（自锁）。
+          hidden: prefs.isHidden(m.key),
         }))
         return json(200, {
           ok: true,
@@ -373,6 +376,7 @@ function installRoutes(
             windows: m.windows ?? [],
             defaultWindow: m.defaultWindow,
             window: prefs.windowFor(m.key),
+            hidden: prefs.isHidden(m.key),
           })),
           modelsRefreshed,
           errors,
@@ -390,6 +394,31 @@ function installRoutes(
           await adapter.setWindowPreference(model, window)
           logger.info(`dsh-qwenwork-connector: ${model} 上下文档位设为 ${window === 0 ? '自动' : window}`)
           return json(200, { ok: true, model, window })
+        } catch (error) {
+          return json(500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+        }
+      })
+
+      // POST /api/qwenwork/visibility — 显示 / 隐藏某个模型（选择器里出不出现）
+      //
+      // 只改可见性：目录、resolveModel、stream 仍是全量，所以选过这个模型
+      // 的老会话照常能发。适配器内部会广播 models-updated，宿主的选择器
+      // 随即重载，不用重启。
+      registerRoute(`${API_PREFIX}/visibility`, ['POST'], async (request: Request) => {
+        try {
+          const body = (await request.json().catch(() => ({}))) as { model?: unknown; hidden?: unknown }
+          const model = String(body.model ?? '').trim()
+          if (model === '') return json(400, { ok: false, error: 'model 必填' })
+          const hidden = body.hidden === true
+          if (!adapter.models.some(m => m.key === model)) {
+            return json(400, {
+              ok: false,
+              error: `未知模型 "${model}"（可用：${adapter.models.map(m => m.key).join(', ')}）`,
+            })
+          }
+          await adapter.setModelVisibility(model, hidden)
+          logger.info(`dsh-qwenwork-connector: ${model} ${hidden ? '已从选择器隐藏' : '已恢复显示'}`)
+          return json(200, { ok: true, model, hidden })
         } catch (error) {
           return json(500, { ok: false, error: error instanceof Error ? error.message : String(error) })
         }
